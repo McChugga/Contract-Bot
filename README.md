@@ -1,2 +1,2 @@
 # Contract-Bot
-Discord contract management bot with individual web-based contract pages.
+A Discord contract management bot with individual web-based contract pages.
