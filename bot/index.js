@@ -29,7 +29,6 @@ async function initDatabase() {
       field TEXT NOT NULL,
       description TEXT,
       payment NUMERIC(12, 2),
-      expires TEXT,
       terms TEXT,
       status VARCHAR(30) NOT NULL DEFAULT 'PENDING',
       creator_discord_id VARCHAR(50),
@@ -113,7 +112,6 @@ function buildContractDetailsEmbed(contract) {
       { name: "👤 Contractor", value: contract.contractor, inline: true },
       { name: "🌾 Field", value: contract.field, inline: true },
       { name: "💰 Payment", value: formatPayment(contract.payment), inline: true },
-      { name: "⏳ Contract Expires", value: contract.expires, inline: true },
       { name: "📝 Description", value: contract.description || "None", inline: false },
       { name: "📌 Additional Terms", value: contract.terms || "None", inline: false }
     )
@@ -132,7 +130,6 @@ function buildReviewEmbed(contract, contractId) {
       { name: "👤 Contractor", value: contract.contractor, inline: true },
       { name: "🌾 Field", value: contract.field, inline: true },
       { name: "💰 Payment", value: formatPayment(contract.payment), inline: true },
-      { name: "⏳ Contract Expires", value: contract.expires, inline: true },
       { name: "📝 Description", value: contract.description, inline: false },
       { name: "📌 Additional Terms", value: contract.terms, inline: false }
     )
@@ -180,7 +177,6 @@ function buildCompletedContractEmbed(contract) {
       { name: "👤 Contractor", value: contract.contractor, inline: true },
       { name: "🌾 Field", value: contract.field, inline: true },
       { name: "💰 Payment", value: formatPayment(contract.payment), inline: true },
-      { name: "⏳ Contract Expires", value: contract.expires, inline: true },
       { name: "📝 Description", value: contract.description || "None", inline: false },
       { name: "📌 Additional Terms", value: contract.terms || "None", inline: false }
     )
@@ -225,12 +221,11 @@ async function saveContract(contract, creatorDiscordId) {
         field,
         description,
         payment,
-        expires,
         terms,
         status,
         creator_discord_id
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
       [
         contractId,
         contract.title,
@@ -238,7 +233,6 @@ async function saveContract(contract, creatorDiscordId) {
         contract.field,
         contract.description,
         contract.payment,
-        contract.expires,
         contract.terms,
         "PENDING",
         creatorDiscordId
@@ -369,14 +363,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         .setRequired(true)
         .setMaxLength(20);
 
-      const expiresInput = new TextInputBuilder()
-        .setCustomId("expires")
-        .setLabel("Contract Expires")
-        .setPlaceholder("Example: 09/05/2026")
-        .setStyle(TextInputStyle.Short)
-        .setRequired(true)
-        .setMaxLength(30);
-
       const modal = new ModalBuilder()
         .setCustomId("contract_basic_form")
         .setTitle("Create Contract")
@@ -384,8 +370,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           new ActionRowBuilder().addComponents(titleInput),
           new ActionRowBuilder().addComponents(contractorInput),
           new ActionRowBuilder().addComponents(fieldInput),
-          new ActionRowBuilder().addComponents(paymentInput),
-          new ActionRowBuilder().addComponents(expiresInput)
+          new ActionRowBuilder().addComponents(paymentInput)
         );
 
       await interaction.showModal(modal);
@@ -415,7 +400,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.customId === "contract_mine") {
       try {
         const result = await pool.query(
-          `SELECT contract_id, title, contractor, field, payment, expires, status
+          `SELECT contract_id, title, contractor, field, payment, status
            FROM contracts
            WHERE creator_discord_id = $1 OR accepted_by_discord_id = $1
            ORDER BY created_at DESC
@@ -440,8 +425,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
               value:
                 `**${contract.title}**\n` +
                 `Contractor: ${contract.contractor}\n` +
-                `Field: ${contract.field} • ${formatPayment(contract.payment)}\n` +
-                `Expires: ${contract.expires}`,
+                `Field: ${contract.field} • ${formatPayment(contract.payment)}`,
               inline: false
             }))
           )
@@ -534,8 +518,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             { name: "📄 Contract ID", value: contractId, inline: true },
             { name: "📊 Status", value: "🟡 PENDING", inline: true },
             { name: "🌾 Field", value: contract.field, inline: true },
-            { name: "💰 Payment", value: formatPayment(contract.payment), inline: true },
-            { name: "⏳ Contract Expires", value: contract.expires, inline: true }
+            { name: "💰 Payment", value: formatPayment(contract.payment), inline: true }
           )
           .setFooter({ text: "Contract Bot • Permanent Database Record" })
           .setTimestamp();
@@ -767,7 +750,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     try {
       const result = await pool.query(
         `SELECT contract_id, title, contractor, field, description, payment,
-                expires, terms, status, created_at
+                terms, status, created_at
          FROM contracts
          WHERE contract_id = $1`,
         [contractId]
@@ -812,7 +795,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
       contractor: interaction.fields.getTextInputValue("contractor"),
       field: interaction.fields.getTextInputValue("field"),
       payment,
-      expires: interaction.fields.getTextInputValue("expires"),
       creator: interaction.user.id
     };
 
@@ -866,7 +848,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         { name: "👤 Contractor", value: contract.contractor, inline: true },
         { name: "🌾 Field", value: contract.field, inline: true },
         { name: "💰 Payment", value: formatPayment(contract.payment), inline: true },
-        { name: "⏳ Contract Expires", value: contract.expires, inline: true },
         { name: "📝 Description", value: contract.description, inline: false },
         { name: "📌 Additional Terms", value: contract.terms, inline: false }
       )
