@@ -66,6 +66,13 @@ const client = new Client({
 });
 
 const pendingContracts = new Map();
+const REVIEW_CHANNEL_ID = "1544537312967270451";
+const APPROVER_ROLE_IDS = [
+  "1540049091504119918", // Farmhand
+  "1540049282554532060", // Farm Foreman
+  "1540049456702038157", // Farm Manager
+  "1540049706367852674"  // ULA Supervisors
+];
 
 const contractCommand = new SlashCommandBuilder()
   .setName("contract")
@@ -76,6 +83,46 @@ function formatPayment(payment) {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2
   })}`;
+}
+
+function buildReviewEmbed(contract, contractId) {
+  return new EmbedBuilder()
+    .setTitle("📋 Contract Awaiting Review")
+    .setDescription("An authorized supervisor must accept or reject this contract.")
+    .addFields(
+      { name: "📄 Contract ID", value: contractId, inline: true },
+      { name: "📊 Status", value: "🟡 PENDING", inline: true },
+      { name: "📄 Contract Title", value: contract.title, inline: true },
+      { name: "👤 Contractor", value: contract.contractor, inline: true },
+      { name: "🌾 Field", value: contract.field, inline: true },
+      { name: "💰 Payment", value: formatPayment(contract.payment), inline: true },
+      { name: "⏳ Contract Expires", value: contract.expires, inline: true },
+      { name: "📝 Description", value: contract.description, inline: false },
+      { name: "📌 Additional Terms", value: contract.terms, inline: false }
+    )
+    .setFooter({ text: "Contract Bot • Approval Required" })
+    .setTimestamp();
+}
+
+function buildApprovalButtons(contractId) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`contract_accept:${contractId}`)
+      .setLabel("Accept Contract")
+      .setEmoji("✅")
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId(`contract_reject:${contractId}`)
+      .setLabel("Reject Contract")
+      .setEmoji("❌")
+      .setStyle(ButtonStyle.Danger)
+  );
+}
+
+function isApprover(interaction) {
+  return APPROVER_ROLE_IDS.some((roleId) =>
+    interaction.member?.roles?.cache?.has(roleId)
+  );
 }
 
 async function saveContract(contract, creatorDiscordId) {
@@ -342,13 +389,27 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return;
       }
 
+      let contractId;
+
       try {
-        const contractId = await saveContract(contract, interaction.user.id);
+        contractId = await saveContract(contract, interaction.user.id);
         pendingContracts.delete(interaction.user.id);
+
+        const reviewChannel = await client.channels.fetch(REVIEW_CHANNEL_ID);
+        if (!reviewChannel?.isTextBased()) {
+          throw new Error("The configured review channel is not a text channel.");
+        }
+
+        await reviewChannel.send({
+          embeds: [buildReviewEmbed(contract, contractId)],
+          components: [buildApprovalButtons(contractId)]
+        });
 
         const embed = new EmbedBuilder()
           .setTitle("✅ Contract Created")
-          .setDescription("Your contract has been created and permanently saved.")
+          .setDescription(
+            "Your contract has been created, permanently saved, and sent for approval."
+          )
           .addFields(
             { name: "📄 Contract ID", value: contractId, inline: true },
             { name: "📊 Status", value: "🟡 PENDING", inline: true },
@@ -364,9 +425,66 @@ client.on(Events.InteractionCreate, async (interaction) => {
       } catch (error) {
         console.error("Failed to save contract:", error);
         await interaction.update({
-          content: "❌ Something went wrong while saving the contract. Please try again.",
+          content: contractId
+            ? `⚠️ Contract ${contractId} was saved, but could not be posted for approval. Please contact an administrator.`
+            : "❌ Something went wrong while saving the contract. Please try again.",
           embeds: [],
           components: []
+        });
+      }
+      return;
+    }
+
+    if (
+      interaction.customId.startsWith("contract_accept:") ||
+      interaction.customId.startsWith("contract_reject:")
+    ) {
+      if (!isApprover(interaction)) {
+        await interaction.reply({
+          content: "❌ You do not have permission to approve or reject contracts.",
+          ephemeral: true
+        });
+        return;
+      }
+
+      const [action, contractId] = interaction.customId.split(":");
+      const status = action === "contract_accept" ? "ACCEPTED" : "REJECTED";
+
+      try {
+        const result = await pool.query(
+          `UPDATE contracts
+           SET status = $1, updated_at = CURRENT_TIMESTAMP
+           WHERE contract_id = $2 AND status = 'PENDING'
+           RETURNING contract_id`,
+          [status, contractId]
+        );
+
+        if (result.rowCount === 0) {
+          await interaction.reply({
+            content: "❌ This contract has already been reviewed.",
+            ephemeral: true
+          });
+          return;
+        }
+
+        const accepted = status === "ACCEPTED";
+        const embed = EmbedBuilder.from(interaction.message.embeds[0])
+          .setTitle(accepted ? "✅ Contract Accepted" : "❌ Contract Rejected")
+          .setColor(accepted ? 0x57F287 : 0xED4245)
+          .setFooter({
+            text: `${status} by ${interaction.user.tag}`
+          })
+          .setTimestamp();
+
+        await interaction.update({
+          embeds: [embed],
+          components: []
+        });
+      } catch (error) {
+        console.error("Failed to update contract status:", error);
+        await interaction.reply({
+          content: "❌ Something went wrong while updating this contract.",
+          ephemeral: true
         });
       }
       return;
