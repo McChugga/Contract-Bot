@@ -14,9 +14,11 @@ const {
 
 const express = require("express");
 const { Pool } = require("pg");
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL
 });
+
 async function initDatabase() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS contracts (
@@ -39,12 +41,13 @@ async function initDatabase() {
   console.log("PostgreSQL database connected");
   console.log("Contracts table ready");
 }
-const app = express();
-const PORT = process.env.PORT || 3000;
 
 // ==============================
 // Web Server
 // ==============================
+
+const app = express();
+const PORT = process.env.PORT || 3000;
 
 app.get("/", (req, res) => {
   res.send("Contract Bot is running.");
@@ -62,25 +65,79 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
 
-// ==============================
-// Temporary Contract Storage
-// ==============================
-
 const pendingContracts = new Map();
-
-let contractNumber = 1;
-
-// ==============================
-// Slash Command
-// ==============================
 
 const contractCommand = new SlashCommandBuilder()
   .setName("contract")
   .setDescription("Open the Contract Bot contract manager.");
 
-// ==============================
-// Bot Ready
-// ==============================
+function formatPayment(payment) {
+  return `$${Number(payment).toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  })}`;
+}
+
+async function saveContract(contract, creatorDiscordId) {
+  const databaseClient = await pool.connect();
+
+  try {
+    await databaseClient.query("BEGIN");
+
+    // This lock prevents two confirmations from receiving the same CB number.
+    await databaseClient.query(
+      "SELECT pg_advisory_xact_lock($1::bigint)",
+      ["1127709345178714254"]
+    );
+
+    const numberResult = await databaseClient.query(`
+      SELECT COALESCE(
+        MAX(CAST(SUBSTRING(contract_id FROM 4) AS INTEGER)),
+        0
+      ) + 1 AS next_number
+      FROM contracts
+      WHERE contract_id ~ '^CB-[0-9]+$'
+    `);
+
+    const contractId = `CB-${String(numberResult.rows[0].next_number).padStart(6, "0")}`;
+
+    await databaseClient.query(
+      `INSERT INTO contracts (
+        contract_id,
+        title,
+        contractor,
+        field,
+        description,
+        payment,
+        expires,
+        terms,
+        status,
+        creator_discord_id
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      [
+        contractId,
+        contract.title,
+        contract.contractor,
+        contract.field,
+        contract.description,
+        contract.payment,
+        contract.expires,
+        contract.terms,
+        "PENDING",
+        creatorDiscordId
+      ]
+    );
+
+    await databaseClient.query("COMMIT");
+    return contractId;
+  } catch (error) {
+    await databaseClient.query("ROLLBACK");
+    throw error;
+  } finally {
+    databaseClient.release();
+  }
+}
 
 client.once(Events.ClientReady, async () => {
   console.log(`Contract Bot is online as ${client.user.tag}`);
@@ -90,99 +147,80 @@ client.once(Events.ClientReady, async () => {
       [contractCommand],
       "1127709345178714254"
     );
-
     console.log("Successfully registered /contract");
   } catch (error) {
     console.error("Failed to register /contract:", error);
   }
 });
 
-// ==============================
-// Interaction Handler
-// ==============================
-
 client.on(Events.InteractionCreate, async (interaction) => {
-
   // ============================
   // /contract
   // ============================
 
   if (interaction.isChatInputCommand()) {
-
-    if (interaction.commandName === "contract") {
-
-      const embed = new EmbedBuilder()
-        .setTitle("📄 Contract Manager")
-        .setDescription(
-          "Welcome to **Contract Bot**!\n\n" +
-          "Use the buttons below to create and manage contracts."
-        )
-        .addFields(
-          {
-            name: "➕ Create Contract",
-            value: "Create a new contract and begin the approval process.",
-            inline: false
-          },
-          {
-            name: "🔎 View Contract",
-            value: "Look up an existing contract by its Contract ID.",
-            inline: false
-          },
-          {
-            name: "📊 My Contracts",
-            value: "View contracts that you created or are involved in.",
-            inline: false
-          }
-        )
-        .setFooter({
-          text: "Contract Bot • Contract Management System"
-        })
-        .setTimestamp();
-
-      const buttons = new ActionRowBuilder().addComponents(
-
-        new ButtonBuilder()
-          .setCustomId("contract_create")
-          .setLabel("Create Contract")
-          .setEmoji("➕")
-          .setStyle(ButtonStyle.Success),
-
-        new ButtonBuilder()
-          .setCustomId("contract_view")
-          .setLabel("View Contract")
-          .setEmoji("🔎")
-          .setStyle(ButtonStyle.Primary),
-
-        new ButtonBuilder()
-          .setCustomId("contract_mine")
-          .setLabel("My Contracts")
-          .setEmoji("📊")
-          .setStyle(ButtonStyle.Secondary)
-
-      );
-
-      await interaction.reply({
-        embeds: [embed],
-        components: [buttons],
-        ephemeral: true
-      });
-
+    if (interaction.commandName !== "contract") {
       return;
     }
+
+    const embed = new EmbedBuilder()
+      .setTitle("📄 Contract Manager")
+      .setDescription(
+        "Welcome to **Contract Bot**!\n\n" +
+        "Use the buttons below to create and manage contracts."
+      )
+      .addFields(
+        {
+          name: "➕ Create Contract",
+          value: "Create a new contract and begin the approval process.",
+          inline: false
+        },
+        {
+          name: "🔎 View Contract",
+          value: "Look up an existing contract by its Contract ID.",
+          inline: false
+        },
+        {
+          name: "📊 My Contracts",
+          value: "View contracts that you created or are involved in.",
+          inline: false
+        }
+      )
+      .setFooter({ text: "Contract Bot • Contract Management System" })
+      .setTimestamp();
+
+    const buttons = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId("contract_create")
+        .setLabel("Create Contract")
+        .setEmoji("➕")
+        .setStyle(ButtonStyle.Success),
+      new ButtonBuilder()
+        .setCustomId("contract_view")
+        .setLabel("View Contract")
+        .setEmoji("🔎")
+        .setStyle(ButtonStyle.Primary),
+      new ButtonBuilder()
+        .setCustomId("contract_mine")
+        .setLabel("My Contracts")
+        .setEmoji("📊")
+        .setStyle(ButtonStyle.Secondary)
+    );
+
+    await interaction.reply({
+      embeds: [embed],
+      components: [buttons],
+      ephemeral: true
+    });
+    return;
   }
 
   // ============================
-  // Create Contract Button
+  // Buttons
   // ============================
 
   if (interaction.isButton()) {
-
     if (interaction.customId === "contract_create") {
-
-      const modal = new ModalBuilder()
-        .setCustomId("contract_basic_form")
-        .setTitle("Create Contract");
-
       const titleInput = new TextInputBuilder()
         .setCustomId("contract_title")
         .setLabel("Contract Title")
@@ -223,139 +261,45 @@ client.on(Events.InteractionCreate, async (interaction) => {
         .setRequired(true)
         .setMaxLength(30);
 
-      const row1 = new ActionRowBuilder().addComponents(titleInput);
-      const row2 = new ActionRowBuilder().addComponents(contractorInput);
-      const row3 = new ActionRowBuilder().addComponents(fieldInput);
-      const row4 = new ActionRowBuilder().addComponents(paymentInput);
-      const row5 = new ActionRowBuilder().addComponents(expiresInput);
-
-      modal.addComponents(row1, row2, row3, row4, row5);
-
-      await interaction.showModal(modal);
-
-      return;
-    }
-
-    // ============================
-    // View Contract
-    // ============================
-
-    if (interaction.customId === "contract_view") {
-
-      await interaction.reply({
-        content:
-          "🔎 **View Contract**\n\n" +
-          "The Contract ID lookup system will be added after the database is connected.",
-        ephemeral: true
-      });
-
-      return;
-    }
-
-    // ============================
-    // My Contracts
-    // ============================
-
-    if (interaction.customId === "contract_mine") {
-
-      await interaction.reply({
-        content:
-          "📊 **My Contracts**\n\n" +
-          "Your contract list will appear here once the database is connected.",
-        ephemeral: true
-      });
-
-      return;
-    }
-  }
-
-  // ============================
-  // First Contract Form
-  // ============================
-
-  if (interaction.isModalSubmit()) {
-
-    if (interaction.customId === "contract_basic_form") {
-
-      const title =
-        interaction.fields.getTextInputValue("contract_title");
-
-      const contractor =
-        interaction.fields.getTextInputValue("contractor");
-
-      const field =
-        interaction.fields.getTextInputValue("field");
-
-      const payment =
-        interaction.fields.getTextInputValue("payment");
-
-      const expires =
-        interaction.fields.getTextInputValue("expires");
-
-      const contractId =
-        `CB-${String(contractNumber).padStart(6, "0")}`;
-
-      pendingContracts.set(interaction.user.id, {
-        contractId,
-        title,
-        contractor,
-        field,
-        payment,
-        expires,
-        creator: interaction.user.id
-      });
-
-      const embed = new EmbedBuilder()
-        .setTitle("📝 Contract Details")
-        .setDescription(
-          "Contract information saved!\n\n" +
-          "Now add the description and any additional terms."
-        )
-        .addFields(
-          {
-            name: "Contract",
-            value: contractId,
-            inline: true
-          },
-          {
-            name: "Title",
-            value: title,
-            inline: true
-          }
+      const modal = new ModalBuilder()
+        .setCustomId("contract_basic_form")
+        .setTitle("Create Contract")
+        .addComponents(
+          new ActionRowBuilder().addComponents(titleInput),
+          new ActionRowBuilder().addComponents(contractorInput),
+          new ActionRowBuilder().addComponents(fieldInput),
+          new ActionRowBuilder().addComponents(paymentInput),
+          new ActionRowBuilder().addComponents(expiresInput)
         );
 
-      const button = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId("contract_details")
-          .setLabel("Add Contract Details")
-          .setEmoji("📝")
-          .setStyle(ButtonStyle.Primary)
-      );
-
-      await interaction.reply({
-        embeds: [embed],
-        components: [button],
-        ephemeral: true
-      });
-
+      await interaction.showModal(modal);
       return;
     }
 
-    // ============================
-    // Contract Details Form
-    // ============================
+    if (interaction.customId === "contract_view") {
+      await interaction.reply({
+        content: "🔎 **View Contract**\n\nThe Contract ID lookup system will be added after the database is connected.",
+        ephemeral: true
+      });
+      return;
+    }
+
+    if (interaction.customId === "contract_mine") {
+      await interaction.reply({
+        content: "📊 **My Contracts**\n\nYour contract list will appear here once the database is connected.",
+        ephemeral: true
+      });
+      return;
+    }
 
     if (interaction.customId === "contract_details") {
-
       const contract = pendingContracts.get(interaction.user.id);
 
       if (!contract) {
         await interaction.reply({
-          content:
-            "❌ I couldn't find your contract information. Please start again with `/contract`.",
+          content: "❌ I couldn't find your contract information. Please start again with `/contract`.",
           ephemeral: true
         });
-
         return;
       }
 
@@ -384,249 +328,166 @@ client.on(Events.InteractionCreate, async (interaction) => {
         );
 
       await interaction.showModal(modal);
-
       return;
     }
 
-    // ============================
-    // Final Contract Details
-    // ============================
-
-    if (interaction.customId === "contract_details_form") {
-
+    if (interaction.customId === "contract_confirm") {
       const contract = pendingContracts.get(interaction.user.id);
 
       if (!contract) {
         await interaction.reply({
-          content:
-            "❌ Your contract session expired. Please start again with `/contract`.",
+          content: "❌ Your contract session has expired. Please start again.",
           ephemeral: true
         });
-
         return;
       }
 
-      contract.description =
-        interaction.fields.getTextInputValue("description");
+      try {
+        const contractId = await saveContract(contract, interaction.user.id);
+        pendingContracts.delete(interaction.user.id);
 
-      contract.terms =
-        interaction.fields.getTextInputValue("terms") || "None";
+        const embed = new EmbedBuilder()
+          .setTitle("✅ Contract Created")
+          .setDescription("Your contract has been created and permanently saved.")
+          .addFields(
+            { name: "📄 Contract ID", value: contractId, inline: true },
+            { name: "📊 Status", value: "🟡 PENDING", inline: true },
+            { name: "🌾 Field", value: contract.field, inline: true },
+            { name: "💰 Payment", value: formatPayment(contract.payment), inline: true },
+            { name: "⏳ Contract Expires", value: contract.expires, inline: true }
+          )
+          .setFooter({ text: "Contract Bot • Permanent Database Record" })
+          .setTimestamp();
 
-      pendingContracts.set(interaction.user.id, contract);
-
-      const embed = new EmbedBuilder()
-        .setTitle("📋 Review Contract")
-        .setDescription(
-          "Please review the contract information below before creating the contract."
-        )
-        .addFields(
-          {
-            name: "📄 Contract ID",
-            value: contract.contractId,
-            inline: true
-          },
-          {
-            name: "📄 Contract Title",
-            value: contract.title,
-            inline: true
-          },
-          {
-            name: "👤 Contractor",
-            value: contract.contractor,
-            inline: true
-          },
-          {
-            name: "🌾 Field",
-            value: contract.field,
-            inline: true
-          },
-          {
-            name: "💰 Payment",
-            value: `$${contract.payment}`,
-            inline: true
-          },
-          {
-            name: "⏳ Contract Expires",
-            value: contract.expires,
-            inline: true
-          },
-          {
-            name: "📝 Description",
-            value: contract.description,
-            inline: false
-          },
-          {
-            name: "📌 Additional Terms",
-            value: contract.terms,
-            inline: false
-          }
-        )
-        .setFooter({
-          text: "Review carefully before creating the contract."
+        await interaction.update({ embeds: [embed], components: [] });
+        console.log(`Contract ${contractId} saved to PostgreSQL.`);
+      } catch (error) {
+        console.error("Failed to save contract:", error);
+        await interaction.update({
+          content: "❌ Something went wrong while saving the contract. Please try again.",
+          embeds: [],
+          components: []
         });
-
-      const buttons = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId("contract_confirm")
-          .setLabel("Create Contract")
-          .setEmoji("✅")
-          .setStyle(ButtonStyle.Success),
-
-        new ButtonBuilder()
-          .setCustomId("contract_cancel")
-          .setLabel("Cancel")
-          .setEmoji("❌")
-          .setStyle(ButtonStyle.Danger)
-      );
-
-      await interaction.reply({
-        embeds: [embed],
-        components: [buttons],
-        ephemeral: true
-      });
-
-      return;
-    }
-  }
-
-// ============================
-// Confirm / Cancel
-// ============================
-
-if (interaction.isButton()) {
-
-  if (interaction.customId === "contract_confirm") {
-
-    const contract = pendingContracts.get(interaction.user.id);
-
-    if (!contract) {
-      await interaction.reply({
-        content: "❌ Your contract session has expired. Please start again.",
-        ephemeral: true
-      });
+      }
       return;
     }
 
-    try {
-
-      const numberResult = await pool.query(
-        `SELECT COALESCE(
-          MAX(CAST(SUBSTRING(contract_id FROM 4) AS INTEGER)),
-          0
-        ) + 1 AS next_number
-        FROM contracts`
-      );
-
-      const nextNumber = numberResult.rows[0].next_number;
-
-      const contractId =
-        `CB-${String(nextNumber).padStart(6, "0")}`;
-
-      await pool.query(
-        `INSERT INTO contracts (
-          contract_id,
-          title,
-          contractor,
-          field,
-          description,
-          payment,
-          expires,
-          terms,
-          status,
-          creator_discord_id
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-        [
-          contractId,
-          contract.title,
-          contract.contractor,
-          contract.field,
-          contract.description,
-          contract.payment,
-          contract.expires,
-          contract.terms,
-          "PENDING",
-          interaction.user.id
-        ]
-      );
-
+    if (interaction.customId === "contract_cancel") {
       pendingContracts.delete(interaction.user.id);
-
-      const embed = new EmbedBuilder()
-        .setTitle("✅ Contract Created")
-        .setDescription(
-          "Your contract has been created and permanently saved."
-        )
-        .addFields(
-          {
-            name: "📄 Contract ID",
-            value: contractId,
-            inline: true
-          },
-          {
-            name: "📊 Status",
-            value: "🟡 PENDING",
-            inline: true
-          },
-          {
-            name: "🌾 Field",
-            value: contract.field,
-            inline: true
-          },
-          {
-            name: "💰 Payment",
-            value: `$${contract.payment}`,
-            inline: true
-          },
-          {
-            name: "⏳ Contract Expires",
-            value: contract.expires,
-            inline: true
-          }
-        )
-        .setFooter({
-          text: "Contract Bot • Permanent Database Record"
-        })
-        .setTimestamp();
-
       await interaction.update({
-        embeds: [embed],
-        components: []
-      });
-
-      console.log(`Contract ${contractId} saved to PostgreSQL.`);
-
-    } catch (error) {
-
-      console.error("Failed to save contract:", error);
-
-      await interaction.update({
-        content:
-          "❌ Something went wrong while saving the contract. Please try again.",
+        content: "❌ Contract creation cancelled.",
         embeds: [],
         components: []
       });
     }
-
     return;
   }
 
-  if (interaction.customId === "contract_cancel") {
+  // ============================
+  // Modal submissions
+  // ============================
 
-  pendingContracts.delete(interaction.user.id);
+  if (!interaction.isModalSubmit()) {
+    return;
+  }
 
-  await interaction.update({
-    content: "❌ Contract creation cancelled.",
-    embeds: [],
-    components: []
-  });
+  if (interaction.customId === "contract_basic_form") {
+    const paymentText = interaction.fields.getTextInputValue("payment");
+    const payment = Number(paymentText.replace(/[$,\\s]/g, ""));
 
-  return;
-}
+    if (!Number.isFinite(payment) || payment < 0) {
+      await interaction.reply({
+        content: "❌ Enter a valid payment amount, such as `25000`.",
+        ephemeral: true
+      });
+      return;
+    }
 
-}
+    const contract = {
+      title: interaction.fields.getTextInputValue("contract_title"),
+      contractor: interaction.fields.getTextInputValue("contractor"),
+      field: interaction.fields.getTextInputValue("field"),
+      payment,
+      expires: interaction.fields.getTextInputValue("expires"),
+      creator: interaction.user.id
+    };
 
-}
+    pendingContracts.set(interaction.user.id, contract);
+
+    const embed = new EmbedBuilder()
+      .setTitle("📝 Contract Details")
+      .setDescription("Contract information saved!\n\nNow add the description and any additional terms.")
+      .addFields(
+        { name: "Title", value: contract.title, inline: true },
+        { name: "Contractor", value: contract.contractor, inline: true }
+      );
+
+    const button = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId("contract_details")
+        .setLabel("Add Contract Details")
+        .setEmoji("📝")
+        .setStyle(ButtonStyle.Primary)
+    );
+
+    await interaction.reply({
+      embeds: [embed],
+      components: [button],
+      ephemeral: true
+    });
+    return;
+  }
+
+  if (interaction.customId === "contract_details_form") {
+    const contract = pendingContracts.get(interaction.user.id);
+
+    if (!contract) {
+      await interaction.reply({
+        content: "❌ Your contract session expired. Please start again with `/contract`.",
+        ephemeral: true
+      });
+      return;
+    }
+
+    contract.description = interaction.fields.getTextInputValue("description");
+    contract.terms = interaction.fields.getTextInputValue("terms") || "None";
+    pendingContracts.set(interaction.user.id, contract);
+
+    const embed = new EmbedBuilder()
+      .setTitle("📋 Review Contract")
+      .setDescription("Please review the contract information below before creating the contract.")
+      .addFields(
+        { name: "📄 Contract ID", value: "Assigned when confirmed", inline: true },
+        { name: "📄 Contract Title", value: contract.title, inline: true },
+        { name: "👤 Contractor", value: contract.contractor, inline: true },
+        { name: "🌾 Field", value: contract.field, inline: true },
+        { name: "💰 Payment", value: formatPayment(contract.payment), inline: true },
+        { name: "⏳ Contract Expires", value: contract.expires, inline: true },
+        { name: "📝 Description", value: contract.description, inline: false },
+        { name: "📌 Additional Terms", value: contract.terms, inline: false }
+      )
+      .setFooter({ text: "Review carefully before creating the contract." });
+
+    const buttons = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId("contract_confirm")
+        .setLabel("Create Contract")
+        .setEmoji("✅")
+        .setStyle(ButtonStyle.Success),
+      new ButtonBuilder()
+        .setCustomId("contract_cancel")
+        .setLabel("Cancel")
+        .setEmoji("❌")
+        .setStyle(ButtonStyle.Danger)
+    );
+
+    await interaction.reply({
+      embeds: [embed],
+      components: [buttons],
+      ephemeral: true
+    });
+  }
+});
 
 // ==============================
 // Login
