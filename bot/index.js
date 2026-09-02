@@ -495,40 +495,32 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
   if (interaction.isButton()) {
 
-    if (interaction.customId === "contract_confirm") {
+  if (interaction.customId === "contract_confirm") {
 
   const contract = pendingContracts.get(interaction.user.id);
 
   if (!contract) {
     await interaction.reply({
-      content:
-        "❌ Your contract session has expired. Please start again.",
+      content: "❌ Your contract session has expired. Please start again.",
       ephemeral: true
     });
-
     return;
   }
 
   try {
-
-    // Get the next contract number from PostgreSQL
-    const numberResult = await pool.query(`
-      SELECT COALESCE(
+    const numberResult = await pool.query(
+      `SELECT COALESCE(
         MAX(CAST(SUBSTRING(contract_id FROM 4) AS INTEGER)),
         0
       ) + 1 AS next_number
-      FROM contracts
-    `);
+      FROM contracts`
+    );
 
     const nextNumber = numberResult.rows[0].next_number;
+    const contractId = `CB-${String(nextNumber).padStart(6, "0")}`;
 
-    const contractId =
-      `CB-${String(nextNumber).padStart(6, "0")}`;
-
-    // Save the contract permanently
     await pool.query(
-      `
-      INSERT INTO contracts (
+      `INSERT INTO contracts (
         contract_id,
         title,
         contractor,
@@ -540,8 +532,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         status,
         creator_discord_id
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-      `,
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
       [
         contractId,
         contract.title,
@@ -556,7 +547,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
       ]
     );
 
-    // Remove the temporary contract
     pendingContracts.delete(interaction.user.id);
 
     const embed = new EmbedBuilder()
@@ -613,7 +603,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
       embeds: [],
       components: []
     });
-
   }
 
   return;
