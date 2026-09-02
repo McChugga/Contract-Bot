@@ -1,0 +1,13 @@
+{
+  "name": "contract-bot",
+  "version": "1.0.0",
+  "description": "Discord contract management bot with individual web-based contract pages.",
+  "main": "bot/index.js",
+  "scripts": {
+    "start": "node bot/index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.22.1",
+    "express": "^5.1.0"
+  }
+}
