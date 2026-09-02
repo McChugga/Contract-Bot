@@ -613,16 +613,17 @@ if (interaction.isButton()) {
 
   if (interaction.customId === "contract_cancel") {
 
-    pendingContracts.delete(interaction.user.id);
+  pendingContracts.delete(interaction.user.id);
 
-    await interaction.update({
-      content: "❌ Contract creation cancelled.",
-      embeds: [],
-      components: []
-    });
+  await interaction.update({
+    content: "❌ Contract creation cancelled.",
+    embeds: [],
+    components: []
+  });
 
-    return;
-  }
+  return;
+}
+
 }
 
 // ==============================
