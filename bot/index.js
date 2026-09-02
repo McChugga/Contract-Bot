@@ -9,6 +9,10 @@ const {
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
+  RoleSelectMenuBuilder,
+  ChannelSelectMenuBuilder,
+  ChannelType,
+  PermissionFlagsBits,
   Events
 } = require("discord.js");
 
@@ -42,6 +46,36 @@ async function initDatabase() {
       ADD COLUMN IF NOT EXISTS accepted_by_discord_id VARCHAR(50);
   `);
 
+  await pool.query(`
+    ALTER TABLE contracts
+      ADD COLUMN IF NOT EXISTS guild_id VARCHAR(50);
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS guild_contract_settings (
+      guild_id VARCHAR(50) PRIMARY KEY,
+      generator_channel_id VARCHAR(50),
+      open_contracts_channel_id VARCHAR(50),
+      completed_contracts_channel_id VARCHAR(50)
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS guild_contract_approver_roles (
+      guild_id VARCHAR(50) NOT NULL,
+      role_id VARCHAR(50) NOT NULL,
+      PRIMARY KEY (guild_id, role_id)
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS guild_contract_payment_roles (
+      guild_id VARCHAR(50) NOT NULL,
+      role_id VARCHAR(50) NOT NULL,
+      PRIMARY KEY (guild_id, role_id)
+    );
+  `);
+
   console.log("PostgreSQL database connected");
   console.log("Contracts table ready");
 }
@@ -70,19 +104,22 @@ const client = new Client({
 });
 
 const pendingContracts = new Map();
-const REVIEW_CHANNEL_ID = "1544537312967270451";
-const APPROVER_ROLE_IDS = [
-  "1540049091504119918", // Farmhand
-  "1540049282554532060", // Farm Foreman
-  "1540049456702038157", // Farm Manager
-  "1540049706367852674"  // ULA Supervisors
-];
-const COUNTY_REP_ROLE_ID = "1544540665118068818"; // ULA County Rep
-const COMPLETED_CONTRACTS_CHANNEL_ID = "1544543291738038382"; // ULA Completed Contracts
+
+function pendingContractKey(guildId, userId) {
+  return `${guildId}:${userId}`;
+}
 
 const contractCommand = new SlashCommandBuilder()
   .setName("contract")
   .setDescription("Open the Contract Bot contract manager.");
+
+const contractSetupCommand = new SlashCommandBuilder()
+  .setName("contractsetup")
+  .setDescription("Configure Contract Bot roles and channels.");
+
+const createContractChannelsCommand = new SlashCommandBuilder()
+  .setName("createcontractchannels")
+  .setDescription("Create Contract Bot's three channels.");
 
 function formatPayment(payment) {
   return `$${Number(payment).toLocaleString("en-US", {
@@ -122,7 +159,7 @@ function buildContractDetailsEmbed(contract) {
 function buildReviewEmbed(contract, contractId) {
   return new EmbedBuilder()
     .setTitle("📋 Contract Awaiting Review")
-    .setDescription("An authorized supervisor must accept or reject this contract.")
+    .setDescription("A selected contract-acceptor role must accept this contract.")
     .addFields(
       { name: "📄 Contract ID", value: contractId, inline: true },
       { name: "📊 Status", value: "🟡 PENDING", inline: true },
@@ -147,10 +184,10 @@ function buildApprovalButtons(contractId) {
   );
 }
 
-function buildCompleteButton(contractId, acceptedByUserId) {
+function buildCompleteButton(contractId, acceptedByUserId, guildId) {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
-      .setCustomId(`contract_complete:${contractId}:${acceptedByUserId}`)
+      .setCustomId(`contract_complete:${contractId}:${acceptedByUserId}:${guildId}`)
       .setLabel("Contract Complete")
       .setEmoji("🏁")
       .setStyle(ButtonStyle.Primary)
@@ -170,7 +207,7 @@ function buildPaymentConfirmationButtons(contractId) {
 function buildCompletedContractEmbed(contract) {
   return new EmbedBuilder()
     .setTitle("💳 Contract Payment Confirmation Required")
-    .setDescription("ULA County Rep must confirm payment for this completed contract.")
+    .setDescription("A selected payment-confirmer role must confirm payment for this completed contract.")
     .addFields(
       { name: "📄 Contract ID", value: contract.contract_id, inline: true },
       { name: "📄 Contract Title", value: contract.title, inline: true },
@@ -184,13 +221,181 @@ function buildCompletedContractEmbed(contract) {
     .setTimestamp();
 }
 
-function isApprover(interaction) {
-  return APPROVER_ROLE_IDS.some((roleId) =>
-    interaction.member?.roles?.cache?.has(roleId)
+function isAdministrator(interaction) {
+  return interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild);
+}
+
+async function getGuildSettings(guildId) {
+  const result = await pool.query(
+    `SELECT generator_channel_id, open_contracts_channel_id,
+            completed_contracts_channel_id
+     FROM guild_contract_settings
+     WHERE guild_id = $1`,
+    [guildId]
+  );
+  return result.rows[0] || null;
+}
+
+async function setGuildChannel(guildId, field, channelId) {
+  const fields = new Set([
+    "generator_channel_id",
+    "open_contracts_channel_id",
+    "completed_contracts_channel_id"
+  ]);
+
+  if (!fields.has(field)) {
+    throw new Error("Invalid channel-setting field.");
+  }
+
+  await pool.query(
+    `INSERT INTO guild_contract_settings (guild_id, ${field})
+     VALUES ($1, $2)
+     ON CONFLICT (guild_id)
+     DO UPDATE SET ${field} = EXCLUDED.${field}`,
+    [guildId, channelId]
   );
 }
 
-async function saveContract(contract, creatorDiscordId) {
+async function getGuildRoleIds(guildId, tableName) {
+  const tables = new Set([
+    "guild_contract_approver_roles",
+    "guild_contract_payment_roles"
+  ]);
+
+  if (!tables.has(tableName)) {
+    throw new Error("Invalid role-setting table.");
+  }
+
+  const result = await pool.query(
+    `SELECT role_id FROM ${tableName} WHERE guild_id = $1 ORDER BY role_id`,
+    [guildId]
+  );
+  return result.rows.map((row) => row.role_id);
+}
+
+async function setGuildRoleIds(guildId, tableName, roleIds) {
+  const tables = new Set([
+    "guild_contract_approver_roles",
+    "guild_contract_payment_roles"
+  ]);
+
+  if (!tables.has(tableName)) {
+    throw new Error("Invalid role-setting table.");
+  }
+
+  const databaseClient = await pool.connect();
+  try {
+    await databaseClient.query("BEGIN");
+    await databaseClient.query(
+      `DELETE FROM ${tableName} WHERE guild_id = $1`,
+      [guildId]
+    );
+    for (const roleId of roleIds) {
+      await databaseClient.query(
+        `INSERT INTO ${tableName} (guild_id, role_id) VALUES ($1, $2)`,
+        [guildId, roleId]
+      );
+    }
+    await databaseClient.query("COMMIT");
+  } catch (error) {
+    await databaseClient.query("ROLLBACK");
+    throw error;
+  } finally {
+    databaseClient.release();
+  }
+}
+
+function formatChannel(channelId) {
+  return channelId ? `<#${channelId}>` : "Not set";
+}
+
+function formatRoleList(roleIds) {
+  return roleIds.length > 0 ? roleIds.map((roleId) => `<@&${roleId}>`).join(", ") : "Not set";
+}
+
+async function buildSetupPanel(guildId) {
+  const [settings, approverRoles, paymentRoles] = await Promise.all([
+    getGuildSettings(guildId),
+    getGuildRoleIds(guildId, "guild_contract_approver_roles"),
+    getGuildRoleIds(guildId, "guild_contract_payment_roles")
+  ]);
+
+  const embed = new EmbedBuilder()
+    .setTitle("⚙️ Contract Bot Setup")
+    .setDescription(
+      "Choose the roles and existing text channels for this server. " +
+      "Use `/createcontractchannels` to have the bot create the three channels."
+    )
+    .addFields(
+      { name: "Contract Generator", value: formatChannel(settings?.generator_channel_id), inline: false },
+      { name: "Open Contracts", value: formatChannel(settings?.open_contracts_channel_id), inline: false },
+      { name: "Completed Contracts", value: formatChannel(settings?.completed_contracts_channel_id), inline: false },
+      { name: "Contract Acceptors", value: formatRoleList(approverRoles), inline: false },
+      { name: "Payment Confirmers", value: formatRoleList(paymentRoles), inline: false }
+    )
+    .setFooter({ text: "Changes save immediately." });
+
+  const components = [
+    new ActionRowBuilder().addComponents(
+      new RoleSelectMenuBuilder()
+        .setCustomId("config_approver_roles")
+        .setPlaceholder("Select roles that can accept contracts")
+        .setMinValues(0)
+        .setMaxValues(25)
+    ),
+    new ActionRowBuilder().addComponents(
+      new RoleSelectMenuBuilder()
+        .setCustomId("config_payment_roles")
+        .setPlaceholder("Select roles that can confirm payment")
+        .setMinValues(0)
+        .setMaxValues(25)
+    ),
+    new ActionRowBuilder().addComponents(
+      new ChannelSelectMenuBuilder()
+        .setCustomId("config_generator_channel")
+        .setPlaceholder("Select the Contract Generator channel")
+        .setChannelTypes(ChannelType.GuildText)
+        .setMinValues(1)
+        .setMaxValues(1)
+    ),
+    new ActionRowBuilder().addComponents(
+      new ChannelSelectMenuBuilder()
+        .setCustomId("config_open_contracts_channel")
+        .setPlaceholder("Select the Open Contracts channel")
+        .setChannelTypes(ChannelType.GuildText)
+        .setMinValues(1)
+        .setMaxValues(1)
+    ),
+    new ActionRowBuilder().addComponents(
+      new ChannelSelectMenuBuilder()
+        .setCustomId("config_completed_contracts_channel")
+        .setPlaceholder("Select the Completed Contracts channel")
+        .setChannelTypes(ChannelType.GuildText)
+        .setMinValues(1)
+        .setMaxValues(1)
+    )
+  ];
+
+  return { embeds: [embed], components };
+}
+
+async function isApprover(interaction) {
+  const roleIds = await getGuildRoleIds(
+    interaction.guildId,
+    "guild_contract_approver_roles"
+  );
+  return roleIds.some((roleId) => interaction.member?.roles?.cache?.has(roleId));
+}
+
+async function isPaymentConfirmer(interaction) {
+  const roleIds = await getGuildRoleIds(
+    interaction.guildId,
+    "guild_contract_payment_roles"
+  );
+  return roleIds.some((roleId) => interaction.member?.roles?.cache?.has(roleId));
+}
+
+async function saveContract(contract, creatorDiscordId, guildId) {
   const databaseClient = await pool.connect();
 
   try {
@@ -223,9 +428,10 @@ async function saveContract(contract, creatorDiscordId) {
         payment,
         terms,
         status,
-        creator_discord_id
+        creator_discord_id,
+        guild_id
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
       [
         contractId,
         contract.title,
@@ -235,7 +441,8 @@ async function saveContract(contract, creatorDiscordId) {
         contract.payment,
         contract.terms,
         "PENDING",
-        creatorDiscordId
+        creatorDiscordId,
+        guildId
       ]
     );
 
@@ -254,10 +461,10 @@ client.once(Events.ClientReady, async () => {
 
   try {
     await client.application.commands.set(
-      [contractCommand],
+      [contractCommand, contractSetupCommand, createContractChannelsCommand],
       "1127709345178714254"
     );
-    console.log("Successfully registered /contract");
+    console.log("Successfully registered Contract Bot commands");
   } catch (error) {
     console.error("Failed to register /contract:", error);
   }
@@ -269,7 +476,96 @@ client.on(Events.InteractionCreate, async (interaction) => {
   // ============================
 
   if (interaction.isChatInputCommand()) {
+    if (!interaction.guildId) {
+      await interaction.reply({
+        content: "❌ Contract Bot commands can only be used in a server.",
+        ephemeral: true
+      });
+      return;
+    }
+
+    if (interaction.commandName === "contractsetup") {
+      if (!isAdministrator(interaction)) {
+        await interaction.reply({
+          content: "❌ You need the Manage Server permission to configure Contract Bot.",
+          ephemeral: true
+        });
+        return;
+      }
+
+      await interaction.reply({
+        ...(await buildSetupPanel(interaction.guildId)),
+        ephemeral: true
+      });
+      return;
+    }
+
+    if (interaction.commandName === "createcontractchannels") {
+      if (!isAdministrator(interaction)) {
+        await interaction.reply({
+          content: "❌ You need the Manage Server permission to create Contract Bot channels.",
+          ephemeral: true
+        });
+        return;
+      }
+
+      try {
+        const [generatorChannel, openContractsChannel, completedContractsChannel] = await Promise.all([
+          interaction.guild.channels.create({
+            name: "contract-generator",
+            type: ChannelType.GuildText
+          }),
+          interaction.guild.channels.create({
+            name: "open-contracts",
+            type: ChannelType.GuildText
+          }),
+          interaction.guild.channels.create({
+            name: "completed-contracts",
+            type: ChannelType.GuildText
+          })
+        ]);
+
+        await Promise.all([
+          setGuildChannel(interaction.guildId, "generator_channel_id", generatorChannel.id),
+          setGuildChannel(interaction.guildId, "open_contracts_channel_id", openContractsChannel.id),
+          setGuildChannel(interaction.guildId, "completed_contracts_channel_id", completedContractsChannel.id)
+        ]);
+
+        await interaction.reply({
+          content:
+            "✅ Contract Bot channels created:\n" +
+            `${generatorChannel}\n${openContractsChannel}\n${completedContractsChannel}\n\n` +
+            "Next, run `/contractsetup` to select contract acceptors and payment confirmers.",
+          ephemeral: true
+        });
+      } catch (error) {
+        console.error("Failed to create Contract Bot channels:", error);
+        await interaction.reply({
+          content: "❌ I couldn't create the channels. Check that I have the Manage Channels permission.",
+          ephemeral: true
+        });
+      }
+      return;
+    }
+
     if (interaction.commandName !== "contract") {
+      return;
+    }
+
+    const settings = await getGuildSettings(interaction.guildId);
+    if (!settings?.generator_channel_id || !settings.open_contracts_channel_id || !settings.completed_contracts_channel_id) {
+      await interaction.reply({
+        content: "❌ Contract Bot has not been configured yet. An administrator must run `/contractsetup`.",
+        ephemeral: true
+      });
+      return;
+    }
+
+    if (interaction.channelId !== settings.generator_channel_id) {
+      await interaction.reply({
+        content: `📄 Use /contract in ${formatChannel(settings.generator_channel_id)}.`,
+        ephemeral: true
+      });
       return;
     }
 
@@ -328,6 +624,49 @@ client.on(Events.InteractionCreate, async (interaction) => {
   // ============================
   // Buttons
   // ============================
+
+  if (interaction.isRoleSelectMenu() || interaction.isChannelSelectMenu()) {
+    if (!isAdministrator(interaction)) {
+      await interaction.reply({
+        content: "❌ You need the Manage Server permission to change Contract Bot setup.",
+        ephemeral: true
+      });
+      return;
+    }
+
+    try {
+      if (interaction.customId === "config_approver_roles") {
+        await setGuildRoleIds(
+          interaction.guildId,
+          "guild_contract_approver_roles",
+          interaction.values
+        );
+      } else if (interaction.customId === "config_payment_roles") {
+        await setGuildRoleIds(
+          interaction.guildId,
+          "guild_contract_payment_roles",
+          interaction.values
+        );
+      } else if (interaction.customId === "config_generator_channel") {
+        await setGuildChannel(interaction.guildId, "generator_channel_id", interaction.values[0]);
+      } else if (interaction.customId === "config_open_contracts_channel") {
+        await setGuildChannel(interaction.guildId, "open_contracts_channel_id", interaction.values[0]);
+      } else if (interaction.customId === "config_completed_contracts_channel") {
+        await setGuildChannel(interaction.guildId, "completed_contracts_channel_id", interaction.values[0]);
+      } else {
+        return;
+      }
+
+      await interaction.update(await buildSetupPanel(interaction.guildId));
+    } catch (error) {
+      console.error("Failed to update Contract Bot setup:", error);
+      await interaction.reply({
+        content: "❌ Something went wrong while saving that setup change.",
+        ephemeral: true
+      });
+    }
+    return;
+  }
 
   if (interaction.isButton()) {
     if (interaction.customId === "contract_create") {
@@ -402,10 +741,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const result = await pool.query(
           `SELECT contract_id, title, contractor, field, payment, status
            FROM contracts
-           WHERE creator_discord_id = $1 OR accepted_by_discord_id = $1
+           WHERE (creator_discord_id = $1 OR accepted_by_discord_id = $1)
+             AND guild_id = $2
            ORDER BY created_at DESC
            LIMIT 10`,
-          [interaction.user.id]
+          [interaction.user.id, interaction.guildId]
         );
 
         if (result.rowCount === 0) {
@@ -444,7 +784,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     if (interaction.customId === "contract_details") {
-      const contract = pendingContracts.get(interaction.user.id);
+      const contract = pendingContracts.get(pendingContractKey(interaction.guildId, interaction.user.id));
 
       if (!contract) {
         await interaction.reply({
@@ -483,7 +823,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     if (interaction.customId === "contract_confirm") {
-      const contract = pendingContracts.get(interaction.user.id);
+      const contract = pendingContracts.get(pendingContractKey(interaction.guildId, interaction.user.id));
 
       if (!contract) {
         await interaction.reply({
@@ -496,10 +836,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
       let contractId;
 
       try {
-        contractId = await saveContract(contract, interaction.user.id);
-        pendingContracts.delete(interaction.user.id);
+        contractId = await saveContract(
+          contract,
+          interaction.user.id,
+          interaction.guildId
+        );
+        pendingContracts.delete(pendingContractKey(interaction.guildId, interaction.user.id));
 
-        const reviewChannel = await client.channels.fetch(REVIEW_CHANNEL_ID);
+        const settings = await getGuildSettings(interaction.guildId);
+        const reviewChannel = await client.channels.fetch(settings?.open_contracts_channel_id);
         if (!reviewChannel?.isTextBased()) {
           throw new Error("The configured review channel is not a text channel.");
         }
@@ -539,7 +884,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     if (interaction.customId.startsWith("contract_accept:")) {
-      if (!isApprover(interaction)) {
+      if (!(await isApprover(interaction))) {
         await interaction.reply({
           content: "❌ You do not have permission to accept contracts.",
           ephemeral: true
@@ -555,9 +900,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
            SET status = 'ACCEPTED',
                accepted_by_discord_id = $1,
                updated_at = CURRENT_TIMESTAMP
-           WHERE contract_id = $2 AND status = 'PENDING'
+           WHERE contract_id = $2 AND guild_id = $3 AND status = 'PENDING'
            RETURNING contract_id`,
-          [interaction.user.id, contractId]
+          [interaction.user.id, contractId, interaction.guildId]
         );
 
         if (result.rowCount === 0) {
@@ -584,7 +929,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         try {
           await interaction.user.send({
             content: `You accepted contract **${contractId}**. Click the button below when the contract is complete.`,
-            components: [buildCompleteButton(contractId, interaction.user.id)]
+            components: [buildCompleteButton(contractId, interaction.user.id, interaction.guildId)]
           });
         } catch (dmError) {
           console.error("Could not send the completion button by direct message:", dmError);
@@ -600,7 +945,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     if (interaction.customId.startsWith("contract_complete:")) {
-      const [, contractId, acceptedByUserId] = interaction.customId.split(":");
+      const [, contractId, acceptedByUserId, contractGuildId] = interaction.customId.split(":");
 
       if (interaction.user.id !== acceptedByUserId) {
         await interaction.reply({
@@ -614,9 +959,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const result = await pool.query(
           `UPDATE contracts
            SET status = 'COMPLETED', updated_at = CURRENT_TIMESTAMP
-           WHERE contract_id = $1 AND status = 'ACCEPTED'
+           WHERE contract_id = $1 AND guild_id = $2 AND status = 'ACCEPTED'
            RETURNING *`,
-          [contractId]
+          [contractId, contractGuildId]
         );
 
         if (result.rowCount === 0) {
@@ -629,18 +974,18 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         let completionPosted = true;
         try {
+          const settings = await getGuildSettings(contractGuildId);
           const completedContractsChannel = await client.channels.fetch(
-            COMPLETED_CONTRACTS_CHANNEL_ID
+            settings?.completed_contracts_channel_id
           );
           if (!completedContractsChannel?.isTextBased()) {
             throw new Error("The configured completed-contracts channel is not a text channel.");
           }
 
           await completedContractsChannel.send({
-            content: `<@&${COUNTY_REP_ROLE_ID}> Contract **${contractId}** has been marked complete by ${interaction.user}. Please confirm payment.`,
+            content: `Contract **${contractId}** has been marked complete by ${interaction.user}. Please confirm payment.`,
             embeds: [buildCompletedContractEmbed(result.rows[0])],
-            components: [buildPaymentConfirmationButtons(contractId)],
-            allowedMentions: { roles: [COUNTY_REP_ROLE_ID] }
+            components: [buildPaymentConfirmationButtons(contractId)]
           });
         } catch (notificationError) {
           completionPosted = false;
@@ -664,9 +1009,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     if (interaction.customId.startsWith("payment_confirm:")) {
-      if (!interaction.member?.roles?.cache?.has(COUNTY_REP_ROLE_ID)) {
+      if (!(await isPaymentConfirmer(interaction))) {
         await interaction.reply({
-          content: "❌ Only ULA County Rep can confirm payment.",
+          content: "❌ You do not have permission to confirm payment.",
           ephemeral: true
         });
         return;
@@ -678,9 +1023,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const result = await pool.query(
           `UPDATE contracts
            SET status = 'PAYMENT_CONFIRMED', updated_at = CURRENT_TIMESTAMP
-           WHERE contract_id = $1 AND status = 'COMPLETED'
+           WHERE contract_id = $1 AND guild_id = $2 AND status = 'COMPLETED'
            RETURNING accepted_by_discord_id`,
-          [contractId]
+          [contractId, interaction.guildId]
         );
 
         if (result.rowCount === 0) {
@@ -723,7 +1068,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     if (interaction.customId === "contract_cancel") {
-      pendingContracts.delete(interaction.user.id);
+      pendingContracts.delete(pendingContractKey(interaction.guildId, interaction.user.id));
       await interaction.update({
         content: "❌ Contract creation cancelled.",
         embeds: [],
@@ -752,8 +1097,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
         `SELECT contract_id, title, contractor, field, description, payment,
                 terms, status, created_at
          FROM contracts
-         WHERE contract_id = $1`,
-        [contractId]
+         WHERE contract_id = $1 AND guild_id = $2`,
+        [contractId, interaction.guildId]
       );
 
       if (result.rowCount === 0) {
@@ -798,7 +1143,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       creator: interaction.user.id
     };
 
-    pendingContracts.set(interaction.user.id, contract);
+    pendingContracts.set(pendingContractKey(interaction.guildId, interaction.user.id), contract);
 
     const embed = new EmbedBuilder()
       .setTitle("📝 Contract Details")
@@ -825,7 +1170,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 
   if (interaction.customId === "contract_details_form") {
-    const contract = pendingContracts.get(interaction.user.id);
+    const contract = pendingContracts.get(pendingContractKey(interaction.guildId, interaction.user.id));
 
     if (!contract) {
       await interaction.reply({
@@ -837,7 +1182,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     contract.description = interaction.fields.getTextInputValue("description");
     contract.terms = interaction.fields.getTextInputValue("terms") || "None";
-    pendingContracts.set(interaction.user.id, contract);
+    pendingContracts.set(pendingContractKey(interaction.guildId, interaction.user.id), contract);
 
     const embed = new EmbedBuilder()
       .setTitle("📋 Review Contract")
