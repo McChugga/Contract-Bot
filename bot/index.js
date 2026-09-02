@@ -489,140 +489,78 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
   }
 
-  // ============================
-  // Confirm / Cancel
-  // ============================
+// ============================
+// Confirm / Cancel
+// ============================
 
-  if (interaction.isButton()) {
+if (interaction.isButton()) {
 
   if (interaction.customId === "contract_confirm") {
 
-  const contract = pendingContracts.get(interaction.user.id);
+    const contract = pendingContracts.get(interaction.user.id);
 
-  if (!contract) {
-    await interaction.reply({
-      content: "❌ Your contract session has expired. Please start again.",
-      ephemeral: true
-    });
-    return;
-  }
+    if (!contract) {
+      await interaction.reply({
+        content: "❌ Your contract session has expired. Please start again.",
+        ephemeral: true
+      });
+      return;
+    }
 
-  try {
-    const numberResult = await pool.query(
-      `SELECT COALESCE(
-        MAX(CAST(SUBSTRING(contract_id FROM 4) AS INTEGER)),
-        0
-      ) + 1 AS next_number
-      FROM contracts`
-    );
+    try {
 
-    const nextNumber = numberResult.rows[0].next_number;
-    const contractId = `CB-${String(nextNumber).padStart(6, "0")}`;
+      const numberResult = await pool.query(
+        `SELECT COALESCE(
+          MAX(CAST(SUBSTRING(contract_id FROM 4) AS INTEGER)),
+          0
+        ) + 1 AS next_number
+        FROM contracts`
+      );
 
-    await pool.query(
-      `INSERT INTO contracts (
-        contract_id,
-        title,
-        contractor,
-        field,
-        description,
-        payment,
-        expires,
-        terms,
-        status,
-        creator_discord_id
-      )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-      [
-        contractId,
-        contract.title,
-        contract.contractor,
-        contract.field,
-        contract.description,
-        contract.payment,
-        contract.expires,
-        contract.terms,
-        "PENDING",
-        interaction.user.id
-      ]
-    );
+      const nextNumber = numberResult.rows[0].next_number;
 
-    pendingContracts.delete(interaction.user.id);
+      const contractId =
+        `CB-${String(nextNumber).padStart(6, "0")}`;
 
-    const embed = new EmbedBuilder()
-      .setTitle("✅ Contract Created")
-      .setDescription(
-        "Your contract has been created and permanently saved."
-      )
-      .addFields(
-        {
-          name: "📄 Contract ID",
-          value: contractId,
-          inline: true
-        },
-        {
-          name: "📊 Status",
-          value: "🟡 PENDING",
-          inline: true
-        },
-        {
-          name: "🌾 Field",
-          value: contract.field,
-          inline: true
-        },
-        {
-          name: "💰 Payment",
-          value: `$${contract.payment}`,
-          inline: true
-        },
-        {
-          name: "⏳ Contract Expires",
-          value: contract.expires,
-          inline: true
-        }
-      )
-      .setFooter({
-        text: "Contract Bot • Permanent Database Record"
-      })
-      .setTimestamp();
-
-    await interaction.update({
-      embeds: [embed],
-      components: []
-    });
-
-    console.log(`Contract ${contractId} saved to PostgreSQL.`);
-
-  } catch (error) {
-
-    console.error("Failed to save contract:", error);
-
-    await interaction.update({
-      content:
-        "❌ Something went wrong while saving the contract. Please try again.",
-      embeds: [],
-      components: []
-    });
-  }
-
-  return;
-}
-      contract.status = "PENDING";
-      contract.createdAt = new Date().toISOString();
-
-      contractNumber++;
+      await pool.query(
+        `INSERT INTO contracts (
+          contract_id,
+          title,
+          contractor,
+          field,
+          description,
+          payment,
+          expires,
+          terms,
+          status,
+          creator_discord_id
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+        [
+          contractId,
+          contract.title,
+          contract.contractor,
+          contract.field,
+          contract.description,
+          contract.payment,
+          contract.expires,
+          contract.terms,
+          "PENDING",
+          interaction.user.id
+        ]
+      );
 
       pendingContracts.delete(interaction.user.id);
 
       const embed = new EmbedBuilder()
         .setTitle("✅ Contract Created")
         .setDescription(
-          "Your contract has been created successfully!"
+          "Your contract has been created and permanently saved."
         )
         .addFields(
           {
             name: "📄 Contract ID",
-            value: contract.contractId,
+            value: contractId,
             inline: true
           },
           {
@@ -634,10 +572,20 @@ client.on(Events.InteractionCreate, async (interaction) => {
             name: "🌾 Field",
             value: contract.field,
             inline: true
+          },
+          {
+            name: "💰 Payment",
+            value: `$${contract.payment}`,
+            inline: true
+          },
+          {
+            name: "⏳ Contract Expires",
+            value: contract.expires,
+            inline: true
           }
         )
         .setFooter({
-          text: "Permanent database storage will be added next."
+          text: "Contract Bot • Permanent Database Record"
         })
         .setTimestamp();
 
@@ -646,26 +594,36 @@ client.on(Events.InteractionCreate, async (interaction) => {
         components: []
       });
 
-      console.log("Contract created:", contract);
+      console.log(`Contract ${contractId} saved to PostgreSQL.`);
 
-      return;
-    }
+    } catch (error) {
 
-    if (interaction.customId === "contract_cancel") {
-
-      pendingContracts.delete(interaction.user.id);
+      console.error("Failed to save contract:", error);
 
       await interaction.update({
-        content: "❌ Contract creation cancelled.",
+        content:
+          "❌ Something went wrong while saving the contract. Please try again.",
         embeds: [],
         components: []
       });
-
-      return;
     }
-  }
-});
 
+    return;
+  }
+
+  if (interaction.customId === "contract_cancel") {
+
+    pendingContracts.delete(interaction.user.id);
+
+    await interaction.update({
+      content: "❌ Contract creation cancelled.",
+      embeds: [],
+      components: []
+    });
+
+    return;
+  }
+}
 // ==============================
 // Login
 // ==============================
