@@ -13,7 +13,32 @@ const {
 } = require("discord.js");
 
 const express = require("express");
+const { Pool } = require("pg");
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL
+});
+async function initDatabase() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS contracts (
+      id SERIAL PRIMARY KEY,
+      contract_id VARCHAR(50) UNIQUE NOT NULL,
+      title TEXT NOT NULL,
+      contractor TEXT NOT NULL,
+      field TEXT NOT NULL,
+      description TEXT,
+      payment NUMERIC(12, 2),
+      expires TEXT,
+      terms TEXT,
+      status VARCHAR(30) NOT NULL DEFAULT 'PENDING',
+      creator_discord_id VARCHAR(50),
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
 
+  console.log("PostgreSQL database connected");
+  console.log("Contracts table ready");
+}
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -547,4 +572,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
 // Login
 // ==============================
 
-client.login(process.env.DISCORD_TOKEN);
+initDatabase()
+  .then(() => client.login(process.env.DISCORD_TOKEN))
+  .catch((error) => {
+    console.error("Database connection failed:", error);
+    process.exit(1);
+  });
