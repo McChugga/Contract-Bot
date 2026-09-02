@@ -6,6 +6,9 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
   Events
 } = require("discord.js");
 
@@ -35,7 +38,15 @@ const client = new Client({
 });
 
 // ==============================
-// Slash Commands
+// Temporary Contract Storage
+// ==============================
+
+const pendingContracts = new Map();
+
+let contractNumber = 1;
+
+// ==============================
+// Slash Command
 // ==============================
 
 const contractCommand = new SlashCommandBuilder()
@@ -67,7 +78,10 @@ client.once(Events.ClientReady, async () => {
 
 client.on(Events.InteractionCreate, async (interaction) => {
 
-  // /contract command
+  // ============================
+  // /contract
+  // ============================
+
   if (interaction.isChatInputCommand()) {
 
     if (interaction.commandName === "contract") {
@@ -132,37 +146,91 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
   }
 
-  // Create Contract button
+  // ============================
+  // Create Contract Button
+  // ============================
+
   if (interaction.isButton()) {
 
     if (interaction.customId === "contract_create") {
 
-      await interaction.reply({
-        content:
-          "➕ **Create Contract**\n\n" +
-          "The contract creation form is the next part of the system.\n\n" +
-          "We'll collect the contract information, generate a unique Contract ID, " +
-          "and then create the contract record.",
-        ephemeral: true
-      });
+      const modal = new ModalBuilder()
+        .setCustomId("contract_basic_form")
+        .setTitle("Create Contract");
+
+      const titleInput = new TextInputBuilder()
+        .setCustomId("contract_title")
+        .setLabel("Contract Title")
+        .setPlaceholder("Example: Soybean Harvest Contract")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setMaxLength(100);
+
+      const contractorInput = new TextInputBuilder()
+        .setCustomId("contractor")
+        .setLabel("Contractor")
+        .setPlaceholder("Enter the contractor's name")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setMaxLength(100);
+
+      const fieldInput = new TextInputBuilder()
+        .setCustomId("field")
+        .setLabel("Field")
+        .setPlaceholder("Example: Field 42")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setMaxLength(100);
+
+      const paymentInput = new TextInputBuilder()
+        .setCustomId("payment")
+        .setLabel("Payment Amount")
+        .setPlaceholder("Example: 25000")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setMaxLength(20);
+
+      const expiresInput = new TextInputBuilder()
+        .setCustomId("expires")
+        .setLabel("Contract Expires")
+        .setPlaceholder("Example: 09/05/2026")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setMaxLength(30);
+
+      const row1 = new ActionRowBuilder().addComponents(titleInput);
+      const row2 = new ActionRowBuilder().addComponents(contractorInput);
+      const row3 = new ActionRowBuilder().addComponents(fieldInput);
+      const row4 = new ActionRowBuilder().addComponents(paymentInput);
+      const row5 = new ActionRowBuilder().addComponents(expiresInput);
+
+      modal.addComponents(row1, row2, row3, row4, row5);
+
+      await interaction.showModal(modal);
 
       return;
     }
 
-    // View Contract button
+    // ============================
+    // View Contract
+    // ============================
+
     if (interaction.customId === "contract_view") {
 
       await interaction.reply({
         content:
           "🔎 **View Contract**\n\n" +
-          "The Contract ID lookup system is coming next.",
+          "The Contract ID lookup system will be added after the database is connected.",
         ephemeral: true
       });
 
       return;
     }
 
-    // My Contracts button
+    // ============================
+    // My Contracts
+    // ============================
+
     if (interaction.customId === "contract_mine") {
 
       await interaction.reply({
@@ -170,6 +238,304 @@ client.on(Events.InteractionCreate, async (interaction) => {
           "📊 **My Contracts**\n\n" +
           "Your contract list will appear here once the database is connected.",
         ephemeral: true
+      });
+
+      return;
+    }
+  }
+
+  // ============================
+  // First Contract Form
+  // ============================
+
+  if (interaction.isModalSubmit()) {
+
+    if (interaction.customId === "contract_basic_form") {
+
+      const title =
+        interaction.fields.getTextInputValue("contract_title");
+
+      const contractor =
+        interaction.fields.getTextInputValue("contractor");
+
+      const field =
+        interaction.fields.getTextInputValue("field");
+
+      const payment =
+        interaction.fields.getTextInputValue("payment");
+
+      const expires =
+        interaction.fields.getTextInputValue("expires");
+
+      const contractId =
+        `CB-${String(contractNumber).padStart(6, "0")}`;
+
+      pendingContracts.set(interaction.user.id, {
+        contractId,
+        title,
+        contractor,
+        field,
+        payment,
+        expires,
+        creator: interaction.user.id
+      });
+
+      const embed = new EmbedBuilder()
+        .setTitle("📝 Contract Details")
+        .setDescription(
+          "Contract information saved!\n\n" +
+          "Now add the description and any additional terms."
+        )
+        .addFields(
+          {
+            name: "Contract",
+            value: contractId,
+            inline: true
+          },
+          {
+            name: "Title",
+            value: title,
+            inline: true
+          }
+        );
+
+      const button = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId("contract_details")
+          .setLabel("Add Contract Details")
+          .setEmoji("📝")
+          .setStyle(ButtonStyle.Primary)
+      );
+
+      await interaction.reply({
+        embeds: [embed],
+        components: [button],
+        ephemeral: true
+      });
+
+      return;
+    }
+
+    // ============================
+    // Contract Details Form
+    // ============================
+
+    if (interaction.customId === "contract_details") {
+
+      const contract = pendingContracts.get(interaction.user.id);
+
+      if (!contract) {
+        await interaction.reply({
+          content:
+            "❌ I couldn't find your contract information. Please start again with `/contract`.",
+          ephemeral: true
+        });
+
+        return;
+      }
+
+      const descriptionInput = new TextInputBuilder()
+        .setCustomId("description")
+        .setLabel("Contract Description")
+        .setPlaceholder("Describe the work being performed.")
+        .setStyle(TextInputStyle.Paragraph)
+        .setRequired(true)
+        .setMaxLength(1000);
+
+      const termsInput = new TextInputBuilder()
+        .setCustomId("terms")
+        .setLabel("Additional Terms")
+        .setPlaceholder("Enter any additional contract terms.")
+        .setStyle(TextInputStyle.Paragraph)
+        .setRequired(false)
+        .setMaxLength(1000);
+
+      const modal = new ModalBuilder()
+        .setCustomId("contract_details_form")
+        .setTitle("Contract Details")
+        .addComponents(
+          new ActionRowBuilder().addComponents(descriptionInput),
+          new ActionRowBuilder().addComponents(termsInput)
+        );
+
+      await interaction.showModal(modal);
+
+      return;
+    }
+
+    // ============================
+    // Final Contract Details
+    // ============================
+
+    if (interaction.customId === "contract_details_form") {
+
+      const contract = pendingContracts.get(interaction.user.id);
+
+      if (!contract) {
+        await interaction.reply({
+          content:
+            "❌ Your contract session expired. Please start again with `/contract`.",
+          ephemeral: true
+        });
+
+        return;
+      }
+
+      contract.description =
+        interaction.fields.getTextInputValue("description");
+
+      contract.terms =
+        interaction.fields.getTextInputValue("terms") || "None";
+
+      pendingContracts.set(interaction.user.id, contract);
+
+      const embed = new EmbedBuilder()
+        .setTitle("📋 Review Contract")
+        .setDescription(
+          "Please review the contract information below before creating the contract."
+        )
+        .addFields(
+          {
+            name: "📄 Contract ID",
+            value: contract.contractId,
+            inline: true
+          },
+          {
+            name: "📄 Contract Title",
+            value: contract.title,
+            inline: true
+          },
+          {
+            name: "👤 Contractor",
+            value: contract.contractor,
+            inline: true
+          },
+          {
+            name: "🌾 Field",
+            value: contract.field,
+            inline: true
+          },
+          {
+            name: "💰 Payment",
+            value: `$${contract.payment}`,
+            inline: true
+          },
+          {
+            name: "⏳ Contract Expires",
+            value: contract.expires,
+            inline: true
+          },
+          {
+            name: "📝 Description",
+            value: contract.description,
+            inline: false
+          },
+          {
+            name: "📌 Additional Terms",
+            value: contract.terms,
+            inline: false
+          }
+        )
+        .setFooter({
+          text: "Review carefully before creating the contract."
+        });
+
+      const buttons = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId("contract_confirm")
+          .setLabel("Create Contract")
+          .setEmoji("✅")
+          .setStyle(ButtonStyle.Success),
+
+        new ButtonBuilder()
+          .setCustomId("contract_cancel")
+          .setLabel("Cancel")
+          .setEmoji("❌")
+          .setStyle(ButtonStyle.Danger)
+      );
+
+      await interaction.reply({
+        embeds: [embed],
+        components: [buttons],
+        ephemeral: true
+      });
+
+      return;
+    }
+  }
+
+  // ============================
+  // Confirm / Cancel
+  // ============================
+
+  if (interaction.isButton()) {
+
+    if (interaction.customId === "contract_confirm") {
+
+      const contract = pendingContracts.get(interaction.user.id);
+
+      if (!contract) {
+        await interaction.reply({
+          content:
+            "❌ Your contract session has expired. Please start again.",
+          ephemeral: true
+        });
+
+        return;
+      }
+
+      contract.status = "PENDING";
+      contract.createdAt = new Date().toISOString();
+
+      contractNumber++;
+
+      pendingContracts.delete(interaction.user.id);
+
+      const embed = new EmbedBuilder()
+        .setTitle("✅ Contract Created")
+        .setDescription(
+          "Your contract has been created successfully!"
+        )
+        .addFields(
+          {
+            name: "📄 Contract ID",
+            value: contract.contractId,
+            inline: true
+          },
+          {
+            name: "📊 Status",
+            value: "🟡 PENDING",
+            inline: true
+          },
+          {
+            name: "🌾 Field",
+            value: contract.field,
+            inline: true
+          }
+        )
+        .setFooter({
+          text: "Permanent database storage will be added next."
+        })
+        .setTimestamp();
+
+      await interaction.update({
+        embeds: [embed],
+        components: []
+      });
+
+      console.log("Contract created:", contract);
+
+      return;
+    }
+
+    if (interaction.customId === "contract_cancel") {
+
+      pendingContracts.delete(interaction.user.id);
+
+      await interaction.update({
+        content: "❌ Contract creation cancelled.",
+        embeds: [],
+        components: []
       });
 
       return;
