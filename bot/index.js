@@ -73,6 +73,7 @@ const APPROVER_ROLE_IDS = [
   "1540049456702038157", // Farm Manager
   "1540049706367852674"  // ULA Supervisors
 ];
+const COUNTY_REP_ROLE_ID = "1544540665118068818"; // ULA County Rep
 
 const contractCommand = new SlashCommandBuilder()
   .setName("contract")
@@ -110,12 +111,17 @@ function buildApprovalButtons(contractId) {
       .setCustomId(`contract_accept:${contractId}`)
       .setLabel("Accept Contract")
       .setEmoji("✅")
-      .setStyle(ButtonStyle.Success),
+      .setStyle(ButtonStyle.Success)
+  );
+}
+
+function buildCompleteButton(contractId, acceptedByUserId) {
+  return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
-      .setCustomId(`contract_reject:${contractId}`)
-      .setLabel("Reject Contract")
-      .setEmoji("❌")
-      .setStyle(ButtonStyle.Danger)
+      .setCustomId(`contract_complete:${contractId}:${acceptedByUserId}`)
+      .setLabel("Contract Complete")
+      .setEmoji("🏁")
+      .setStyle(ButtonStyle.Primary)
   );
 }
 
@@ -435,28 +441,24 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
-    if (
-      interaction.customId.startsWith("contract_accept:") ||
-      interaction.customId.startsWith("contract_reject:")
-    ) {
+    if (interaction.customId.startsWith("contract_accept:")) {
       if (!isApprover(interaction)) {
         await interaction.reply({
-          content: "❌ You do not have permission to approve or reject contracts.",
+          content: "❌ You do not have permission to accept contracts.",
           ephemeral: true
         });
         return;
       }
 
-      const [action, contractId] = interaction.customId.split(":");
-      const status = action === "contract_accept" ? "ACCEPTED" : "REJECTED";
+      const [, contractId] = interaction.customId.split(":");
 
       try {
         const result = await pool.query(
           `UPDATE contracts
-           SET status = $1, updated_at = CURRENT_TIMESTAMP
-           WHERE contract_id = $2 AND status = 'PENDING'
+           SET status = 'ACCEPTED', updated_at = CURRENT_TIMESTAMP
+           WHERE contract_id = $1 AND status = 'PENDING'
            RETURNING contract_id`,
-          [status, contractId]
+          [contractId]
         );
 
         if (result.rowCount === 0) {
@@ -467,12 +469,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return;
         }
 
-        const accepted = status === "ACCEPTED";
         const embed = EmbedBuilder.from(interaction.message.embeds[0])
-          .setTitle(accepted ? "✅ Contract Accepted" : "❌ Contract Rejected")
-          .setColor(accepted ? 0x57F287 : 0xED4245)
+          .setTitle("✅ Contract Accepted")
+          .setColor(0x57F287)
           .setFooter({
-            text: `${status} by ${interaction.user.tag}`
+            text: `ACCEPTED by ${interaction.user.tag}`
           })
           .setTimestamp();
 
@@ -480,10 +481,79 @@ client.on(Events.InteractionCreate, async (interaction) => {
           embeds: [embed],
           components: []
         });
+
+        try {
+          await interaction.user.send({
+            content: `You accepted contract **${contractId}**. Click the button below when the contract is complete.`,
+            components: [buildCompleteButton(contractId, interaction.user.id)]
+          });
+        } catch (dmError) {
+          console.error("Could not send the completion button by direct message:", dmError);
+        }
       } catch (error) {
         console.error("Failed to update contract status:", error);
         await interaction.reply({
           content: "❌ Something went wrong while updating this contract.",
+          ephemeral: true
+        });
+      }
+      return;
+    }
+
+    if (interaction.customId.startsWith("contract_complete:")) {
+      const [, contractId, acceptedByUserId] = interaction.customId.split(":");
+
+      if (interaction.user.id !== acceptedByUserId) {
+        await interaction.reply({
+          content: "❌ Only the person who accepted this contract can mark it complete.",
+          ephemeral: true
+        });
+        return;
+      }
+
+      try {
+        const result = await pool.query(
+          `UPDATE contracts
+           SET status = 'COMPLETED', updated_at = CURRENT_TIMESTAMP
+           WHERE contract_id = $1 AND status = 'ACCEPTED'
+           RETURNING contract_id`,
+          [contractId]
+        );
+
+        if (result.rowCount === 0) {
+          await interaction.reply({
+            content: "❌ This contract is no longer available to mark complete.",
+            ephemeral: true
+          });
+          return;
+        }
+
+        let countyRepNotified = true;
+        try {
+          const reviewChannel = await client.channels.fetch(REVIEW_CHANNEL_ID);
+          if (!reviewChannel?.isTextBased()) {
+            throw new Error("The configured review channel is not a text channel.");
+          }
+
+          await reviewChannel.send({
+            content: `<@&${COUNTY_REP_ROLE_ID}> Contract **${contractId}** has been marked complete by ${interaction.user}.`,
+            allowedMentions: { roles: [COUNTY_REP_ROLE_ID] }
+          });
+        } catch (notificationError) {
+          countyRepNotified = false;
+          console.error("Could not notify ULA County Rep:", notificationError);
+        }
+
+        await interaction.update({
+          content: countyRepNotified
+            ? `✅ Contract **${contractId}** marked complete. ULA County Rep has been notified.`
+            : `⚠️ Contract **${contractId}** is marked complete, but ULA County Rep could not be notified.`,
+          components: []
+        });
+      } catch (error) {
+        console.error("Failed to complete contract:", error);
+        await interaction.reply({
+          content: "❌ Something went wrong while completing this contract.",
           ephemeral: true
         });
       }
