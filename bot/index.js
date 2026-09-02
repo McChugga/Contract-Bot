@@ -92,6 +92,35 @@ function formatPayment(payment) {
   })}`;
 }
 
+function formatStatus(status) {
+  const labels = {
+    PENDING: "🟡 PENDING",
+    ACCEPTED: "🟢 ACCEPTED",
+    COMPLETED: "🔵 COMPLETED — payment confirmation required",
+    PAYMENT_CONFIRMED: "✅ PAYMENT CONFIRMED"
+  };
+
+  return labels[status] || status;
+}
+
+function buildContractDetailsEmbed(contract) {
+  return new EmbedBuilder()
+    .setTitle("📄 Contract Details")
+    .addFields(
+      { name: "📄 Contract ID", value: contract.contract_id, inline: true },
+      { name: "📊 Status", value: formatStatus(contract.status), inline: true },
+      { name: "📄 Contract Title", value: contract.title, inline: true },
+      { name: "👤 Contractor", value: contract.contractor, inline: true },
+      { name: "🌾 Field", value: contract.field, inline: true },
+      { name: "💰 Payment", value: formatPayment(contract.payment), inline: true },
+      { name: "⏳ Contract Expires", value: contract.expires, inline: true },
+      { name: "📝 Description", value: contract.description || "None", inline: false },
+      { name: "📌 Additional Terms", value: contract.terms || "None", inline: false }
+    )
+    .setFooter({ text: "Contract Bot • Permanent Database Record" })
+    .setTimestamp(new Date(contract.created_at));
+}
+
 function buildReviewEmbed(contract, contractId) {
   return new EmbedBuilder()
     .setTitle("📋 Contract Awaiting Review")
@@ -364,18 +393,69 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     if (interaction.customId === "contract_view") {
-      await interaction.reply({
-        content: "🔎 **View Contract**\n\nThe Contract ID lookup system will be added after the database is connected.",
-        ephemeral: true
-      });
+      const contractIdInput = new TextInputBuilder()
+        .setCustomId("contract_id")
+        .setLabel("Contract ID")
+        .setPlaceholder("Example: CB-000001")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setMaxLength(50);
+
+      const modal = new ModalBuilder()
+        .setCustomId("contract_view_form")
+        .setTitle("View Contract")
+        .addComponents(
+          new ActionRowBuilder().addComponents(contractIdInput)
+        );
+
+      await interaction.showModal(modal);
       return;
     }
 
     if (interaction.customId === "contract_mine") {
-      await interaction.reply({
-        content: "📊 **My Contracts**\n\nYour contract list will appear here once the database is connected.",
-        ephemeral: true
-      });
+      try {
+        const result = await pool.query(
+          `SELECT contract_id, title, contractor, field, payment, expires, status
+           FROM contracts
+           WHERE creator_discord_id = $1 OR accepted_by_discord_id = $1
+           ORDER BY created_at DESC
+           LIMIT 10`,
+          [interaction.user.id]
+        );
+
+        if (result.rowCount === 0) {
+          await interaction.reply({
+            content: "📊 You have not created or accepted any contracts yet.",
+            ephemeral: true
+          });
+          return;
+        }
+
+        const embed = new EmbedBuilder()
+          .setTitle("📊 My Contracts")
+          .setDescription("Your 10 most recent created or accepted contracts.")
+          .addFields(
+            result.rows.map((contract) => ({
+              name: `${contract.contract_id} • ${formatStatus(contract.status)}`,
+              value:
+                `**${contract.title}**\n` +
+                `Contractor: ${contract.contractor}\n` +
+                `Field: ${contract.field} • ${formatPayment(contract.payment)}\n` +
+                `Expires: ${contract.expires}`,
+              inline: false
+            }))
+          )
+          .setFooter({ text: "Use View Contract for full details." })
+          .setTimestamp();
+
+        await interaction.reply({ embeds: [embed], ephemeral: true });
+      } catch (error) {
+        console.error("Failed to load the user's contracts:", error);
+        await interaction.reply({
+          content: "❌ Something went wrong while loading your contracts.",
+          ephemeral: true
+        });
+      }
       return;
     }
 
@@ -675,6 +755,43 @@ client.on(Events.InteractionCreate, async (interaction) => {
   // ============================
 
   if (!interaction.isModalSubmit()) {
+    return;
+  }
+
+  if (interaction.customId === "contract_view_form") {
+    const contractId = interaction.fields
+      .getTextInputValue("contract_id")
+      .trim()
+      .toUpperCase();
+
+    try {
+      const result = await pool.query(
+        `SELECT contract_id, title, contractor, field, description, payment,
+                expires, terms, status, created_at
+         FROM contracts
+         WHERE contract_id = $1`,
+        [contractId]
+      );
+
+      if (result.rowCount === 0) {
+        await interaction.reply({
+          content: `❌ No contract was found with ID **${contractId}**.`,
+          ephemeral: true
+        });
+        return;
+      }
+
+      await interaction.reply({
+        embeds: [buildContractDetailsEmbed(result.rows[0])],
+        ephemeral: true
+      });
+    } catch (error) {
+      console.error("Failed to load contract details:", error);
+      await interaction.reply({
+        content: "❌ Something went wrong while loading that contract.",
+        ephemeral: true
+      });
+    }
     return;
   }
 
