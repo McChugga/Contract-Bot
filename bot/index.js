@@ -1,7 +1,12 @@
 const {
   Client,
   GatewayIntentBits,
-  SlashCommandBuilder
+  SlashCommandBuilder,
+  EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  Events
 } = require("discord.js");
 
 const express = require("express");
@@ -26,13 +31,11 @@ app.listen(PORT, "0.0.0.0", () => {
 // ==============================
 
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds
-  ]
+  intents: [GatewayIntentBits.Guilds]
 });
 
 // ==============================
-// Contract Command
+// Slash Commands
 // ==============================
 
 const contractCommand = new SlashCommandBuilder()
@@ -43,7 +46,7 @@ const contractCommand = new SlashCommandBuilder()
 // Bot Ready
 // ==============================
 
-client.once("clientReady", async () => {
+client.once(Events.ClientReady, async () => {
   console.log(`Contract Bot is online as ${client.user.tag}`);
 
   try {
@@ -59,20 +62,118 @@ client.once("clientReady", async () => {
 });
 
 // ==============================
-// Slash Command Handler
+// Interaction Handler
 // ==============================
 
-client.on("interactionCreate", async (interaction) => {
-  if (!interaction.isChatInputCommand()) return;
+client.on(Events.InteractionCreate, async (interaction) => {
 
-  if (interaction.commandName === "contract") {
-    await interaction.reply({
-      content:
-        "📄 **Contract Manager**\n\n" +
-        "Contract Bot is ready!\n\n" +
-        "The contract creation system is coming next.",
-      ephemeral: true
-    });
+  // /contract command
+  if (interaction.isChatInputCommand()) {
+
+    if (interaction.commandName === "contract") {
+
+      const embed = new EmbedBuilder()
+        .setTitle("📄 Contract Manager")
+        .setDescription(
+          "Welcome to **Contract Bot**!\n\n" +
+          "Use the buttons below to create and manage contracts."
+        )
+        .addFields(
+          {
+            name: "➕ Create Contract",
+            value: "Create a new contract and begin the approval process.",
+            inline: false
+          },
+          {
+            name: "🔎 View Contract",
+            value: "Look up an existing contract by its Contract ID.",
+            inline: false
+          },
+          {
+            name: "📊 My Contracts",
+            value: "View contracts that you created or are involved in.",
+            inline: false
+          }
+        )
+        .setFooter({
+          text: "Contract Bot • Contract Management System"
+        })
+        .setTimestamp();
+
+      const buttons = new ActionRowBuilder().addComponents(
+
+        new ButtonBuilder()
+          .setCustomId("contract_create")
+          .setLabel("Create Contract")
+          .setEmoji("➕")
+          .setStyle(ButtonStyle.Success),
+
+        new ButtonBuilder()
+          .setCustomId("contract_view")
+          .setLabel("View Contract")
+          .setEmoji("🔎")
+          .setStyle(ButtonStyle.Primary),
+
+        new ButtonBuilder()
+          .setCustomId("contract_mine")
+          .setLabel("My Contracts")
+          .setEmoji("📊")
+          .setStyle(ButtonStyle.Secondary)
+
+      );
+
+      await interaction.reply({
+        embeds: [embed],
+        components: [buttons],
+        ephemeral: true
+      });
+
+      return;
+    }
+  }
+
+  // Create Contract button
+  if (interaction.isButton()) {
+
+    if (interaction.customId === "contract_create") {
+
+      await interaction.reply({
+        content:
+          "➕ **Create Contract**\n\n" +
+          "The contract creation form is the next part of the system.\n\n" +
+          "We'll collect the contract information, generate a unique Contract ID, " +
+          "and then create the contract record.",
+        ephemeral: true
+      });
+
+      return;
+    }
+
+    // View Contract button
+    if (interaction.customId === "contract_view") {
+
+      await interaction.reply({
+        content:
+          "🔎 **View Contract**\n\n" +
+          "The Contract ID lookup system is coming next.",
+        ephemeral: true
+      });
+
+      return;
+    }
+
+    // My Contracts button
+    if (interaction.customId === "contract_mine") {
+
+      await interaction.reply({
+        content:
+          "📊 **My Contracts**\n\n" +
+          "Your contract list will appear here once the database is connected.",
+        ephemeral: true
+      });
+
+      return;
+    }
   }
 });
 
