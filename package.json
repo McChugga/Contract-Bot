@@ -6,8 +6,8 @@
   "scripts": {
     "start": "node bot/index.js"
   },
-  "dependencies": {"pg": "^8.16.3"
-    "discord.js": "^14.22.1",
-    "express": "^5.1.0"
-  }
+  "dependencies": {
+  "pg": "^8.16.3",
+  "discord.js": "^14.22.1",
+  "express": "^5.1.0"
 }
