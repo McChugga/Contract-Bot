@@ -38,6 +38,11 @@ async function initDatabase() {
     );
   `);
 
+  await pool.query(`
+    ALTER TABLE contracts
+      ADD COLUMN IF NOT EXISTS accepted_by_discord_id VARCHAR(50);
+  `);
+
   console.log("PostgreSQL database connected");
   console.log("Contracts table ready");
 }
@@ -74,6 +79,7 @@ const APPROVER_ROLE_IDS = [
   "1540049706367852674"  // ULA Supervisors
 ];
 const COUNTY_REP_ROLE_ID = "1544540665118068818"; // ULA County Rep
+const COMPLETED_CONTRACTS_CHANNEL_ID = "1544543291738038382"; // ULA Completed Contracts
 
 const contractCommand = new SlashCommandBuilder()
   .setName("contract")
@@ -123,6 +129,34 @@ function buildCompleteButton(contractId, acceptedByUserId) {
       .setEmoji("🏁")
       .setStyle(ButtonStyle.Primary)
   );
+}
+
+function buildPaymentConfirmationButtons(contractId) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`payment_confirm:${contractId}`)
+      .setLabel("Confirm Payment")
+      .setEmoji("💳")
+      .setStyle(ButtonStyle.Success)
+  );
+}
+
+function buildCompletedContractEmbed(contract) {
+  return new EmbedBuilder()
+    .setTitle("💳 Contract Payment Confirmation Required")
+    .setDescription("ULA County Rep must confirm payment for this completed contract.")
+    .addFields(
+      { name: "📄 Contract ID", value: contract.contract_id, inline: true },
+      { name: "📄 Contract Title", value: contract.title, inline: true },
+      { name: "👤 Contractor", value: contract.contractor, inline: true },
+      { name: "🌾 Field", value: contract.field, inline: true },
+      { name: "💰 Payment", value: formatPayment(contract.payment), inline: true },
+      { name: "⏳ Contract Expires", value: contract.expires, inline: true },
+      { name: "📝 Description", value: contract.description || "None", inline: false },
+      { name: "📌 Additional Terms", value: contract.terms || "None", inline: false }
+    )
+    .setFooter({ text: "Contract Bot • County Rep Payment Confirmation Required" })
+    .setTimestamp();
 }
 
 function isApprover(interaction) {
@@ -455,10 +489,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
       try {
         const result = await pool.query(
           `UPDATE contracts
-           SET status = 'ACCEPTED', updated_at = CURRENT_TIMESTAMP
-           WHERE contract_id = $1 AND status = 'PENDING'
+           SET status = 'ACCEPTED',
+               accepted_by_discord_id = $1,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE contract_id = $2 AND status = 'PENDING'
            RETURNING contract_id`,
-          [contractId]
+          [interaction.user.id, contractId]
         );
 
         if (result.rowCount === 0) {
@@ -516,7 +552,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           `UPDATE contracts
            SET status = 'COMPLETED', updated_at = CURRENT_TIMESTAMP
            WHERE contract_id = $1 AND status = 'ACCEPTED'
-           RETURNING contract_id`,
+           RETURNING *`,
           [contractId]
         );
 
@@ -528,32 +564,95 @@ client.on(Events.InteractionCreate, async (interaction) => {
           return;
         }
 
-        let countyRepNotified = true;
+        let completionPosted = true;
         try {
-          const reviewChannel = await client.channels.fetch(REVIEW_CHANNEL_ID);
-          if (!reviewChannel?.isTextBased()) {
-            throw new Error("The configured review channel is not a text channel.");
+          const completedContractsChannel = await client.channels.fetch(
+            COMPLETED_CONTRACTS_CHANNEL_ID
+          );
+          if (!completedContractsChannel?.isTextBased()) {
+            throw new Error("The configured completed-contracts channel is not a text channel.");
           }
 
-          await reviewChannel.send({
-            content: `<@&${COUNTY_REP_ROLE_ID}> Contract **${contractId}** has been marked complete by ${interaction.user}.`,
+          await completedContractsChannel.send({
+            content: `<@&${COUNTY_REP_ROLE_ID}> Contract **${contractId}** has been marked complete by ${interaction.user}. Please confirm payment.`,
+            embeds: [buildCompletedContractEmbed(result.rows[0])],
+            components: [buildPaymentConfirmationButtons(contractId)],
             allowedMentions: { roles: [COUNTY_REP_ROLE_ID] }
           });
         } catch (notificationError) {
-          countyRepNotified = false;
-          console.error("Could not notify ULA County Rep:", notificationError);
+          completionPosted = false;
+          console.error("Could not post the completed contract:", notificationError);
         }
 
         await interaction.update({
-          content: countyRepNotified
-            ? `✅ Contract **${contractId}** marked complete. ULA County Rep has been notified.`
-            : `⚠️ Contract **${contractId}** is marked complete, but ULA County Rep could not be notified.`,
+          content: completionPosted
+            ? `✅ Contract **${contractId}** marked complete and sent to ULA County Rep for payment confirmation.`
+            : `⚠️ Contract **${contractId}** is marked complete, but could not be posted for payment confirmation.`,
           components: []
         });
       } catch (error) {
         console.error("Failed to complete contract:", error);
         await interaction.reply({
           content: "❌ Something went wrong while completing this contract.",
+          ephemeral: true
+        });
+      }
+      return;
+    }
+
+    if (interaction.customId.startsWith("payment_confirm:")) {
+      if (!interaction.member?.roles?.cache?.has(COUNTY_REP_ROLE_ID)) {
+        await interaction.reply({
+          content: "❌ Only ULA County Rep can confirm payment.",
+          ephemeral: true
+        });
+        return;
+      }
+
+      const [, contractId] = interaction.customId.split(":");
+
+      try {
+        const result = await pool.query(
+          `UPDATE contracts
+           SET status = 'PAYMENT_CONFIRMED', updated_at = CURRENT_TIMESTAMP
+           WHERE contract_id = $1 AND status = 'COMPLETED'
+           RETURNING accepted_by_discord_id`,
+          [contractId]
+        );
+
+        if (result.rowCount === 0) {
+          await interaction.reply({
+            content: "❌ Payment for this contract has already been confirmed.",
+            ephemeral: true
+          });
+          return;
+        }
+
+        const embed = EmbedBuilder.from(interaction.message.embeds[0])
+          .setTitle("💳 Contract Payment Confirmed")
+          .setColor(0x57F287)
+          .setFooter({
+            text: `Payment confirmed by ${interaction.user.tag}`
+          })
+          .setTimestamp();
+
+        await interaction.update({ embeds: [embed], components: [] });
+
+        const acceptedByUserId = result.rows[0].accepted_by_discord_id;
+        if (acceptedByUserId) {
+          try {
+            const acceptingUser = await client.users.fetch(acceptedByUserId);
+            await acceptingUser.send(
+              `💳 ULA County Rep confirmed payment for contract **${contractId}**.`
+            );
+          } catch (dmError) {
+            console.error("Could not notify the accepting user:", dmError);
+          }
+        }
+      } catch (error) {
+        console.error("Failed to confirm contract payment:", error);
+        await interaction.reply({
+          content: "❌ Something went wrong while confirming payment.",
           ephemeral: true
         });
       }
