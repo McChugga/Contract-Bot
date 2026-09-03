@@ -460,13 +460,15 @@ client.once(Events.ClientReady, async () => {
   console.log(`Contract Bot is online as ${client.user.tag}`);
 
   try {
-    await client.application.commands.set(
-      [contractCommand, contractSetupCommand, createContractChannelsCommand],
-      "1127709345178714254"
-    );
-    console.log("Successfully registered Contract Bot commands");
+    await client.application.commands.set([
+      contractCommand,
+      contractSetupCommand,
+      createContractChannelsCommand
+    ]);
+
+    console.log("Successfully registered Contract Bot global commands");
   } catch (error) {
-    console.error("Failed to register /contract:", error);
+    console.error("Failed to register Contract Bot commands:", error);
   }
 });
 
