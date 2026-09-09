@@ -326,9 +326,15 @@ async function buildSetupPanel(guildId, page = "permissions") {
         { name: "👤 Payment Confirmer Members", value: formatMemberList(p.paymentMembers), inline: false }
       );
     components = [
-      new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId("config_approver_roles").setPlaceholder("Select acceptor roles").setMinValues(0).setMaxValues(25)),
+      new ActionRowBuilder().addComponents(
+        new RoleSelectMenuBuilder().setCustomId("config_approver_roles").setPlaceholder("Select acceptor roles").setMinValues(0).setMaxValues(25),
+        new ButtonBuilder().setCustomId("add_approver_role").setLabel("Add Role by ID/Name").setEmoji("➕").setStyle(ButtonStyle.Secondary)
+      ),
       new ActionRowBuilder().addComponents(new UserSelectMenuBuilder().setCustomId("config_approver_members").setPlaceholder("Select individual acceptor members").setMinValues(0).setMaxValues(25)),
-      new ActionRowBuilder().addComponents(new RoleSelectMenuBuilder().setCustomId("config_payment_roles").setPlaceholder("Select payment-confirmer roles").setMinValues(0).setMaxValues(25)),
+      new ActionRowBuilder().addComponents(
+        new RoleSelectMenuBuilder().setCustomId("config_payment_roles").setPlaceholder("Select payment-confirmer roles").setMinValues(0).setMaxValues(25),
+        new ButtonBuilder().setCustomId("add_payment_role").setLabel("Add Role by ID/Name").setEmoji("➕").setStyle(ButtonStyle.Secondary)
+      ),
       new ActionRowBuilder().addComponents(new UserSelectMenuBuilder().setCustomId("config_payment_members").setPlaceholder("Select individual payment-confirmers").setMinValues(0).setMaxValues(25)),
       new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId("setup_channels").setLabel("Channels").setEmoji("📺").setStyle(ButtonStyle.Primary))
     ];
@@ -427,6 +433,18 @@ client.once(Events.ClientReady, async () => {
   } catch (error) { console.error("Failed to register Contract Bot commands:", error); }
 });
 
+async function resolveGuildRole(guild, value) {
+  const input = value.trim();
+  if (!input) return null;
+  const roleIdMatch = input.match(/^(?:<@&)?(\d{15,25})>?$/);
+  if (roleIdMatch) {
+    const role = guild.roles.cache.get(roleIdMatch[1]) || await guild.roles.fetch(roleIdMatch[1]).catch(() => null);
+    if (role && role.id !== guild.id) return role;
+  }
+  const normalized = input.toLowerCase();
+  return guild.roles.cache.find(role => role.id !== guild.id && role.name.toLowerCase() === normalized) || null;
+}
+
 client.on(Events.InteractionCreate, async interaction => {
   try {
     if (interaction.isChatInputCommand()) {
@@ -507,6 +525,16 @@ client.on(Events.InteractionCreate, async interaction => {
     if (interaction.isButton()) {
       if (interaction.customId === "setup_channels") return interaction.update(await buildSetupPanel(interaction.guildId, "channels"));
       if (interaction.customId === "setup_permissions") return interaction.update(await buildSetupPanel(interaction.guildId, "permissions"));
+
+      if (interaction.customId === "add_approver_role" || interaction.customId === "add_payment_role") {
+        const kind = interaction.customId === "add_approver_role" ? "approver" : "payment";
+        const modal = new ModalBuilder().setCustomId(`add_permission_role:${kind}`).setTitle(kind === "approver" ? "Add Contract Acceptor Role" : "Add Payment Confirmer Role").addComponents(
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId("role_value").setLabel("Role ID or exact role name").setPlaceholder("Example: 123456789012345678 or ULA Manager").setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(100)
+          )
+        );
+        return interaction.showModal(modal);
+      }
 
       if (interaction.customId === "contract_create") {
         const modal = new ModalBuilder().setCustomId("contract_basic_form").setTitle("Create Contract").addComponents(
@@ -734,6 +762,18 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if (!interaction.isModalSubmit()) return;
+
+    if (interaction.customId.startsWith("add_permission_role:")) {
+      if (!isAdministrator(interaction)) return interaction.reply({ content: "❌ You need the Manage Server permission to change Contract Bot setup.", ephemeral: true });
+      const kind = interaction.customId.split(":")[1];
+      const role = await resolveGuildRole(interaction.guild, interaction.fields.getTextInputValue("role_value"));
+      if (!role) return interaction.reply({ content: "❌ I couldn't find that server role. Enter the exact role name or the role ID.", ephemeral: true });
+      const tableName = kind === "approver" ? "guild_contract_approver_roles" : "guild_contract_payment_roles";
+      const current = await getIds(interaction.guildId, tableName, "role_id");
+      if (!current.includes(role.id)) current.push(role.id);
+      await setIds(interaction.guildId, tableName, "role_id", current);
+      return interaction.reply({ content: `✅ Added ${role} as a ${kind === "approver" ? "contract acceptor" : "payment confirmer"} role.`, ephemeral: true });
+    }
 
     if (interaction.customId === "contract_view_form") {
       const contractId = interaction.fields.getTextInputValue("contract_id").trim().toUpperCase();
