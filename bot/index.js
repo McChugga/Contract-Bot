@@ -240,6 +240,48 @@ function buildCompletedContractEmbed(contract) {
     .setTimestamp();
 }
 
+function describeDiscordError(error) {
+  const code = error?.code ? ` [code ${error.code}]` : "";
+  const status = error?.status ? ` [HTTP ${error.status}]` : "";
+  const message = error?.rawError?.message || error?.message || String(error);
+  return `${message}${code}${status}`.replace(/\s+/g, " ").trim().slice(0, 700);
+}
+
+async function postContractForApproval(contract, contractId, guildId, isGroup = false) {
+  const settings = await getGuildSettings(guildId);
+  if (!settings?.open_contracts_channel_id) {
+    throw new Error("Open Contracts channel is not configured.");
+  }
+
+  const reviewChannel = await client.channels.fetch(settings.open_contracts_channel_id);
+  if (!reviewChannel) throw new Error(`Open Contracts channel ${settings.open_contracts_channel_id} could not be found.`);
+  if (!reviewChannel.isTextBased() || !reviewChannel.send) {
+    throw new Error(`Configured Open Contracts channel ${settings.open_contracts_channel_id} is not a text channel the bot can post to.`);
+  }
+
+  const me = reviewChannel.guild?.members?.me;
+  if (me && reviewChannel.permissionsFor) {
+    const permissions = reviewChannel.permissionsFor(me);
+    if (permissions && !permissions.has(PermissionFlagsBits.ViewChannel)) {
+      throw new Error(`Missing View Channel permission in <#${reviewChannel.id}>.`);
+    }
+    if (permissions && !permissions.has(PermissionFlagsBits.SendMessages)) {
+      throw new Error(`Missing Send Messages permission in <#${reviewChannel.id}>.`);
+    }
+    if (permissions && !permissions.has(PermissionFlagsBits.EmbedLinks)) {
+      throw new Error(`Missing Embed Links permission in <#${reviewChannel.id}>.`);
+    }
+  }
+
+  const acceptorMentions = await getPermissionMentions(guildId, "approver");
+  await reviewChannel.send({
+    content: `${acceptorMentions.text || "📢 Configured acceptors"} — ${isGroup ? "📋 **New Group Contract**" : "📄 **New Contract**"} is available for acceptance.`,
+    embeds: [buildReviewEmbed(contract, contractId)],
+    components: [buildApprovalButtons(contractId)],
+    allowedMentions: { roles: acceptorMentions.roles, users: acceptorMentions.members }
+  });
+}
+
 function isAdministrator(interaction) {
   return interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild);
 }
@@ -614,15 +656,13 @@ client.on(Events.InteractionCreate, async interaction => {
         try {
           contractId = await saveContract(contract, interaction.user.id, interaction.guildId);
           clearPending(pendingGroupContracts, interaction.guildId, interaction.user.id);
-          const settings = await getGuildSettings(interaction.guildId);
-          const reviewChannel = await client.channels.fetch(settings.open_contracts_channel_id);
-          const acceptorMentions = await getPermissionMentions(interaction.guildId, "approver");
-          await reviewChannel.send({ content: `${acceptorMentions.text || "📢 Configured acceptors"} — 📋 **New Group Contract** is available for acceptance.`, embeds: [buildReviewEmbed(contract, contractId)], components: [buildApprovalButtons(contractId)], allowedMentions: { roles: acceptorMentions.roles, users: acceptorMentions.members } });
+          await postContractForApproval(contract, contractId, interaction.guildId, true);
           await notifyPermissionTargets(interaction.guildId, "approver", `📋 New ULA group contract **${contractId}** is available for acceptance. Check the Open Contracts channel.`);
           return interaction.update({ embeds: [new EmbedBuilder().setTitle("✅ Group Contract Created").setDescription(`Group contract **${contractId}** was saved and sent for approval.`).addFields({ name: "🌾 Fields", value: contract.fields.map((f, i) => `${i + 1}. ${f}`).join("\n") }, { name: "🔨 Duties", value: contract.duties.map((d, i) => `${i + 1}. ${d}`).join("\n") }, { name: "💰 Payment", value: formatPayment(contract.payment), inline: true })], components: [] });
         } catch (error) {
-          console.error("Failed to save group contract:", error);
-          return interaction.update({ content: contractId ? `⚠️ Contract ${contractId} was saved, but could not be posted for approval.` : "❌ Something went wrong while saving the group contract.", embeds: [], components: [] });
+          const details = describeDiscordError(error);
+          console.error(`❌ Group contract ${contractId || "(not saved)"} failed:`, error);
+          return interaction.update({ content: contractId ? `⚠️ Contract **${contractId}** was saved, but could not be posted for approval.\n\n**Reason:** \`${details}\`` : `❌ Something went wrong while saving the group contract.\n\n**Reason:** \`${details}\``, embeds: [], components: [] });
         }
       }
 
@@ -670,15 +710,13 @@ client.on(Events.InteractionCreate, async interaction => {
         try {
           contractId = await saveContract(contract, interaction.user.id, interaction.guildId);
           clearPending(pendingContracts, interaction.guildId, interaction.user.id);
-          const settings = await getGuildSettings(interaction.guildId);
-          const reviewChannel = await client.channels.fetch(settings.open_contracts_channel_id);
-          const acceptorMentions = await getPermissionMentions(interaction.guildId, "approver");
-          await reviewChannel.send({ content: `${acceptorMentions.text || "📢 Configured acceptors"} — 📄 **New Contract** is available for acceptance.`, embeds: [buildReviewEmbed(contract, contractId)], components: [buildApprovalButtons(contractId)], allowedMentions: { roles: acceptorMentions.roles, users: acceptorMentions.members } });
+          await postContractForApproval(contract, contractId, interaction.guildId, false);
           await notifyPermissionTargets(interaction.guildId, "approver", `📄 New ULA contract **${contractId}** is available for acceptance. Check the Open Contracts channel.`);
           return interaction.update({ embeds: [new EmbedBuilder().setTitle("✅ Contract Created").setDescription("Your contract has been created, permanently saved, and sent for approval.").addFields({ name: "📄 Contract ID", value: contractId, inline: true }, { name: "🌾 Field", value: contract.field, inline: true }, { name: "💰 Payment", value: formatPayment(contract.payment), inline: true })], components: [] });
         } catch (error) {
-          console.error("Failed to save contract:", error);
-          return interaction.update({ content: contractId ? `⚠️ Contract ${contractId} was saved, but could not be posted for approval.` : "❌ Something went wrong while saving the contract. Please try again.", embeds: [], components: [] });
+          const details = describeDiscordError(error);
+          console.error(`❌ Contract ${contractId || "(not saved)"} failed:`, error);
+          return interaction.update({ content: contractId ? `⚠️ Contract **${contractId}** was saved, but could not be posted for approval.\n\n**Reason:** \`${details}\`` : `❌ Something went wrong while saving the contract.\n\n**Reason:** \`${details}\``, embeds: [], components: [] });
         }
       }
 
