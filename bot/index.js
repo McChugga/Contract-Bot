@@ -18,11 +18,17 @@ const {
 } = require("discord.js");
 
 const express = require("express");
-const { Pool } = require("pg");
+const { readEnvironment } = require("../config/environment");
+const pool = require("../database/pool");
+const { runMigrations } = require("../database/migrate");
+const { loadCommands } = require("../commands/loader");
+const knowledgeService = require("../services/knowledgeService");
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const config = readEnvironment();
+const modularCommands = loadCommands();
 
 async function initDatabase() {
+  await runMigrations(pool);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS contracts (
       id SERIAL PRIMARY KEY,
@@ -92,8 +98,8 @@ async function initDatabase() {
 }
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-app.get("/", (req, res) => res.send("Contract Bot is running."));
+const PORT = config.port;
+app.get("/", (req, res) => res.send("Guild Guide is running."));
 app.listen(PORT, "0.0.0.0", () => console.log(`Web server running on port ${PORT}`));
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
@@ -494,11 +500,15 @@ function groupBuilderButtons() {
 }
 
 client.once(Events.ClientReady, async () => {
-  console.log(`Contract Bot is online as ${client.user.tag}`);
+  console.log(`Guild Guide is online as ${client.user.tag}`);
+  client.services = { knowledge: knowledgeService };
   try {
-    await client.application.commands.set([contractCommand, contractSetupCommand, createContractChannelsCommand]);
-    console.log("Successfully registered Contract Bot global commands");
-  } catch (error) { console.error("Failed to register Contract Bot commands:", error); }
+    await client.application.commands.set([
+      contractCommand, contractSetupCommand, createContractChannelsCommand,
+      ...[...modularCommands.values()].map(command => command.data)
+    ]);
+    console.log("Successfully registered Guild Guide commands");
+  } catch (error) { console.error("Failed to register Guild Guide commands:", error); }
 });
 
 async function resolveGuildRole(guild, value) {
@@ -516,6 +526,9 @@ async function resolveGuildRole(guild, value) {
 client.on(Events.InteractionCreate, async interaction => {
   try {
     if (interaction.isChatInputCommand()) {
+      if (modularCommands.has(interaction.commandName)) {
+        return await modularCommands.get(interaction.commandName).execute(interaction);
+      }
       if (!interaction.guildId) return interaction.reply({ content: "❌ Contract Bot commands can only be used in a server.", ephemeral: true });
 
       if (interaction.commandName === "contractsetup") {
@@ -900,5 +913,6 @@ client.on(Events.InteractionCreate, async interaction => {
 });
 
 initDatabase()
-  .then(() => client.login(process.env.DISCORD_TOKEN))
+    .then(() => client.login(config.discordToken))
   .catch(error => { console.error("Database connection failed:", error); process.exit(1); });
+
